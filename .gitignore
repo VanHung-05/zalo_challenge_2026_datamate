@@ -9,3 +9,4 @@ outputs/
 !train/questions.jsonl
 !train/answers.jsonl
 !public_test/questions.jsonl
+logs/

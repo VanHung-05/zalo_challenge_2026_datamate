@@ -175,6 +175,7 @@ def run_pipeline(
                                 rulebook_text=rulebook.raw_text,
                                 config=config,
                                 llm=llm,
+                                calendar_df=calendar_df,
                                 trace=log
                             )
                         elif agent_fn is not None:

@@ -258,6 +258,26 @@ class BusinessDB:
             if table.original == "calendar.csv":
                 lines.append("  (lịch dương–âm dùng chung; weekday: 1 = Thứ Hai ... 7 = Chủ nhật; lunar_*: ngày/tháng/năm âm lịch)")
             lines.append("")
+
+        # Quan hệ gợi ý (JOIN hints) giữa các bảng
+        join_hints = []
+        visible_tables = [t for t in self.tables.values() if not t.hidden]
+        candidate_keys = ["ma_hoa_don", "ma_don_hang", "ma_nhap_hang", "ma_hang", "ma_sp", "ma_khach_hang", "ma_kh", "ma_ncc"]
+        for key in candidate_keys:
+            tables_with_key = []
+            for t in visible_tables:
+                col_names = {c.sql_name for c in t.columns}
+                if key in col_names:
+                    tables_with_key.append((t.sql_name, key))
+            if len(tables_with_key) >= 2:
+                names = [t[0] for t in tables_with_key]
+                join_hints.append(f"  - Các bảng có thể JOIN qua cột '{key}': {', '.join(names)}")
+
+        if join_hints:
+            lines.append("GỢI Ý QUAN HỆ GIỮA CÁC BẢNG (JOIN HINTS):")
+            lines.extend(join_hints)
+            lines.append("")
+
         for target, parts in self.merged_into.items():
             if parts:
                 lines.append(f"Các bảng {', '.join(parts)} là các phần đã gộp sẵn vào bảng {target}: dùng {target}.")
