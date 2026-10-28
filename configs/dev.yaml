@@ -1,0 +1,18 @@
+llm:
+  backend: ollama
+  model: "qwen2.5:7b"
+  ollama_url: "http://localhost:11434"
+  seed: 42
+  temperature: 0.0
+  max_tokens: 1024
+
+agent:
+  n_samples: 1
+  max_retries: 2
+  sandbox_timeout: 30
+  confidence_threshold: 0.5
+
+runner:
+  parallel_workers: 1
+  data_dir: "train"
+  output_file: "submission.jsonl"

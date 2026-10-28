@@ -1,0 +1,19 @@
+llm:
+  backend: vllm
+  model: "Qwen/Qwen2.5-14B-Instruct"
+  model_path: "/models/Qwen2.5-14B-Instruct"
+  tp_size: 2
+  seed: 42
+  temperature: 0.0
+  max_tokens: 4096
+
+agent:
+  n_samples: 3
+  max_retries: 3
+  sandbox_timeout: 30
+  confidence_threshold: 0.5
+
+runner:
+  parallel_workers: 4
+  data_dir: "/data"
+  output_file: "/result/submission.jsonl"

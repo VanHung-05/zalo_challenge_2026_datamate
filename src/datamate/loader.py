@@ -1,0 +1,414 @@
+"""Data loader for DataMate.
+Loads CSV, XLSX (including multi-sheet, offset headers, monthly multi-files), and SQLite data.
+Cleans Vietnamese dates, number formats, and filters summary rows.
+"""
+
+import glob
+import os
+import re
+import sqlite3
+import unicodedata
+from dataclasses import dataclass, field
+from datetime import date, datetime
+from typing import Any, Dict, List, Optional, Tuple, Union
+
+import numpy as np
+import openpyxl
+import pandas as pd
+
+
+@dataclass
+class BusinessData:
+    business_id: str
+    data_dir: str
+    readme: str = ""
+    tables: Dict[str, pd.DataFrame] = field(default_factory=dict)
+    unit_conversion: Optional[pd.DataFrame] = None
+    calendar: Optional[pd.DataFrame] = None
+    value_index: Optional[Any] = None
+    date_range: Tuple[Optional[str], Optional[str]] = (None, None)
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+
+def normalize_vietnamese_text(text: str) -> str:
+    if not isinstance(text, str):
+        return ""
+    text = unicodedata.normalize("NFC", text)
+    return text.strip()
+
+
+def parse_vietnamese_date(val: Any, default_year: Optional[int] = None) -> Optional[str]:
+    """Parse date from various formats into 'YYYY-MM-DD'."""
+    if val is None or pd.isna(val):
+        return None
+    if isinstance(val, (datetime, date, pd.Timestamp)):
+        return val.strftime("%Y-%m-%d")
+
+    s = str(val).strip()
+    if not s:
+        return None
+
+    # Already YYYY-MM-DD
+    if re.match(r"^\d{4}-\d{2}-\d{2}", s):
+        return s[:10]
+
+    # Vietnamese format: "1 thg 6 2025" or "15 tháng 1, 2025" or "31 thg 12, 2024"
+    m_vn = re.search(r"(\d{1,2})\s+(?:thg|tháng)\s+(\d{1,2})(?:[,\s]+(\d{4}))?", s, re.IGNORECASE)
+    if m_vn:
+        d = int(m_vn.group(1))
+        m = int(m_vn.group(2))
+        y = int(m_vn.group(3)) if m_vn.group(3) else default_year
+        if y:
+            return f"{y:04d}-{m:02d}-{d:02d}"
+
+    # dd/mm/yyyy or dd-mm-yyyy or dd.mm.yyyy
+    m_dmy = re.match(r"^(\d{1,2})[/.-](\d{1,2})[/.-](\d{4})", s)
+    if m_dmy:
+        d, m, y = int(m_dmy.group(1)), int(m_dmy.group(2)), int(m_dmy.group(3))
+        return f"{y:04d}-{m:02d}-{d:02d}"
+
+    # dd/mm without year
+    m_dm = re.match(r"^(\d{1,2})[/.-](\d{1,2})$", s)
+    if m_dm and default_year:
+        d, m = int(m_dm.group(1)), int(m_dm.group(2))
+        return f"{default_year:04d}-{m:02d}-{d:02d}"
+
+    # Fallback to pd.to_datetime
+    try:
+        ts = pd.to_datetime(s, dayfirst=True)
+        return ts.strftime("%Y-%m-%d")
+    except Exception:
+        return s
+
+
+def parse_vietnamese_number(val: Any) -> Any:
+    """Parse string number into int or float if possible."""
+    if val is None or pd.isna(val):
+        return np.nan
+    if isinstance(val, (int, float, np.integer, np.floating)):
+        return val
+
+    s = str(val).strip()
+    if not s:
+        return np.nan
+
+    # Check for unit suffix like "k", "K"
+    multiplier = 1.0
+    if re.search(r"\d+\s*[kK]$", s):
+        multiplier = 1000.0
+        s = re.sub(r"[kK]$", "", s).strip()
+
+    # Remove currency / quantity suffixes: đ, vnđ, vnd, ly, chai, lon, kg, m, cái, bộ
+    s = re.sub(r"(đ|vnđ|vnd|\$)\s*$", "", s, flags=re.IGNORECASE).strip()
+    s = re.sub(r"^\s*-\s*", "-", s)  # negative sign
+
+    # Clean dots and commas
+    if re.match(r"^-?\d{1,3}(\.\d{3})+(,\d+)?$", s):
+        # dot thousand, comma decimal e.g. 4.820.000 or 4.820.000,50
+        s = s.replace(".", "").replace(",", ".")
+    elif re.match(r"^-?\d{1,3}(,\d{3})+(\.\d+)?$", s):
+        # comma thousand, dot decimal e.g. 4,820,000 or 4,820,000.50
+        s = s.replace(",", "")
+    elif "," in s and "." not in s:
+        # e.g. 12,4 -> 12.4
+        s = s.replace(",", ".")
+
+    try:
+        num = float(s) * multiplier
+        if num.is_integer():
+            return int(num)
+        return num
+    except ValueError:
+        return val
+
+
+def is_date_column_name(col_name: str) -> bool:
+    norm = col_name.lower().strip()
+    date_keywords = ["ngày", "ngay", "date", "thời gian", "thoigian", "time", "hạn dùng", "han_dung", "kỳ", "ky"]
+    return any(k in norm for k in date_keywords)
+
+
+def is_numeric_column_name(col_name: str) -> bool:
+    norm = col_name.lower().strip()
+    num_keywords = [
+        "giá", "gia", "tiền", "tien", "số lượng", "so_luong", "sl", "quy đổi",
+        "quy_doi", "nợ", "no", "chi phí", "chi_phi", "doanh thu", "doanh_thu",
+        "thu", "trả", "tra", "tổng", "tong", "thành tiền", "thanh_tien", "chiết khấu"
+    ]
+    return any(k in norm for k in num_keywords)
+
+
+def clean_dataframe(df: pd.DataFrame, default_year: Optional[int] = None) -> pd.DataFrame:
+    """Clean column names, filter summary rows, normalize dates and numbers (fast vectorized)."""
+    if df.empty:
+        return df
+
+    # Strip and normalize column names
+    clean_cols = []
+    for c in df.columns:
+        c_str = str(c).strip()
+        c_str = unicodedata.normalize("NFC", c_str)
+        clean_cols.append(c_str)
+    df.columns = clean_cols
+
+    # Vectorized drop of nearly-all-null rows
+    min_non_null = max(1, min(2, len(df.columns)))
+    df = df.dropna(thresh=min_non_null).reset_index(drop=True)
+    if df.empty:
+        return df
+
+    # Vectorized filter for summary/total rows ("TỔNG", "TOTAL", etc.)
+    summary_keywords = ("tổng", "tong", "total", "cộng", "cong")
+    check_cols = df.columns[:min(4, len(df.columns))]
+    is_summary = pd.Series(False, index=df.index)
+    for c in check_cols:
+        s_str = df[c].astype(str).str.strip().str.lower()
+        is_summary |= s_str.str.startswith(summary_keywords)
+
+    if is_summary.any():
+        df = df[~is_summary].reset_index(drop=True)
+
+    # Process date and numeric columns
+    for col in df.columns:
+        if is_date_column_name(col):
+            try:
+                df[col] = df[col].apply(lambda x: parse_vietnamese_date(x, default_year))
+            except Exception:
+                pass
+        elif is_numeric_column_name(col):
+            try:
+                # Quick sample check before applying to entire column
+                sample = df[col].dropna().head(20)
+                if not sample.empty:
+                    converted_sample = sample.apply(parse_vietnamese_number)
+                    num_ratio = sum(isinstance(v, (int, float, np.integer, np.floating)) and not pd.isna(v) for v in converted_sample) / len(sample)
+                    if num_ratio >= 0.7:
+                        df[col] = df[col].apply(parse_vietnamese_number)
+            except Exception:
+                pass
+
+    return df
+
+
+def load_excel_sheet(
+    filepath: str,
+    sheet_name: Optional[str] = None,
+    default_year: Optional[int] = None
+) -> pd.DataFrame:
+    """Load an Excel sheet, detecting offset headers and trailing totals."""
+    try:
+        # Load raw values using openpyxl
+        wb = openpyxl.load_workbook(filepath, data_only=True, read_only=True)
+        target_sheet = sheet_name if sheet_name else wb.sheetnames[0]
+        ws = wb[target_sheet]
+
+        all_rows = list(ws.iter_rows(values_only=True))
+        if not all_rows:
+            return pd.DataFrame()
+
+        # Find the header row (search first 10 rows for max non-null strings)
+        best_header_idx = 0
+        max_valid_cols = 0
+        for i in range(min(10, len(all_rows))):
+            row = all_rows[i]
+            valid_cols = [c for c in row if c is not None and str(c).strip() != ""]
+            # Exclude rows that look like report titles (e.g. single long string)
+            if len(valid_cols) > max_valid_cols:
+                max_valid_cols = len(valid_cols)
+                best_header_idx = i
+
+        headers = [str(c).strip() if c is not None else f"col_{idx}" for idx, c in enumerate(all_rows[best_header_idx])]
+        # Discard empty trailing column headers if all values are None
+        data_rows = all_rows[best_header_idx + 1 :]
+        if not data_rows:
+            return pd.DataFrame(columns=headers)
+
+        # Pad rows to length of headers
+        num_cols = len(headers)
+        padded_rows = []
+        for r in data_rows:
+            r_list = list(r)
+            if len(r_list) < num_cols:
+                r_list.extend([None] * (num_cols - len(r_list)))
+            padded_rows.append(r_list[:num_cols])
+
+        df = pd.DataFrame(padded_rows, columns=headers)
+        return clean_dataframe(df, default_year)
+    except Exception as e:
+        # Fallback to standard pandas read_excel
+        try:
+            df = pd.read_excel(filepath, sheet_name=sheet_name)
+            return clean_dataframe(df, default_year)
+        except Exception:
+            return pd.DataFrame()
+
+
+def load_csv_file(filepath: str, default_year: Optional[int] = None) -> pd.DataFrame:
+    """Load CSV with automatic encoding and separator detection."""
+    encodings = ["utf-8-sig", "utf-8", "cp1258", "latin1"]
+    for enc in encodings:
+        for sep in [",", ";", "\t"]:
+            try:
+                df = pd.read_csv(filepath, encoding=enc, sep=sep)
+                if df.shape[1] > 1:
+                    return clean_dataframe(df, default_year)
+            except Exception:
+                continue
+    # Fallback default
+    try:
+        df = pd.read_csv(filepath)
+        return clean_dataframe(df, default_year)
+    except Exception:
+        return pd.DataFrame()
+
+
+def load_sqlite_file(filepath: str) -> Dict[str, pd.DataFrame]:
+    """Load all tables from SQLite file into DataFrames."""
+    tables = {}
+    conn = sqlite3.connect(filepath)
+    cursor = conn.cursor()
+    cursor.execute("SELECT name FROM sqlite_master WHERE type='table';")
+    table_names = [row[0] for row in cursor.fetchall() if not row[0].startswith("sqlite_")]
+    for t_name in table_names:
+        try:
+            df = pd.read_sql_query(f'SELECT * FROM "{t_name}"', conn)
+            tables[t_name] = clean_dataframe(df)
+        except Exception:
+            pass
+    conn.close()
+    return tables
+
+
+def extract_year_month_from_filename(filename: str) -> Tuple[Optional[int], Optional[int]]:
+    """Extract month and year from names like BanHang_T1_2025.xlsx or BanHang_Thang05_2026.xlsx."""
+    m = re.search(r"(?:T|Thang|tháng)_?(\d{1,2})_(\d{4})", filename, re.IGNORECASE)
+    if m:
+        return int(m.group(2)), int(m.group(1))
+    m_year = re.search(r"(\d{4})", filename)
+    if m_year:
+        return int(m_year.group(1)), None
+    return None, None
+
+
+_BUSINESS_CACHE: Dict[str, BusinessData] = {}
+
+
+def load_business_data(
+    business_dir: str,
+    calendar_df: Optional[pd.DataFrame] = None,
+    use_cache: bool = True
+) -> BusinessData:
+    """Load and unify all data files for a specific business."""
+    abs_dir = os.path.abspath(business_dir)
+    biz_id = os.path.basename(abs_dir)
+
+    if use_cache and abs_dir in _BUSINESS_CACHE:
+        return _BUSINESS_CACHE[abs_dir]
+
+    bdata = BusinessData(business_id=biz_id, data_dir=abs_dir, calendar=calendar_df)
+
+    # 1. Read README.md if present
+    readme_path = os.path.join(abs_dir, "README.md")
+    if os.path.exists(readme_path):
+        try:
+            with open(readme_path, "r", encoding="utf-8") as f:
+                bdata.readme = f.read()
+        except Exception:
+            pass
+
+    # 2. Gather all data files
+    all_files = sorted(os.listdir(abs_dir))
+    csv_files = [f for f in all_files if f.endswith(".csv")]
+    xlsx_files = [f for f in all_files if f.endswith(".xlsx")]
+    sqlite_files = [f for f in all_files if f.endswith(".sqlite") or f.endswith(".db")]
+
+    # Group monthly files
+    monthly_sales_frames = []
+    other_tables: Dict[str, pd.DataFrame] = {}
+
+    # Check for SQLite first
+    for sq in sqlite_files:
+        sq_path = os.path.join(abs_dir, sq)
+        sq_tables = load_sqlite_file(sq_path)
+        other_tables.update(sq_tables)
+
+    # Process XLSX files
+    for xf in xlsx_files:
+        x_path = os.path.join(abs_dir, xf)
+        year, month = extract_year_month_from_filename(xf)
+        base_name = os.path.splitext(xf)[0]
+
+        # Is this a monthly sales slice? e.g. BanHang_T1_2025.xlsx or BanHang_TongHop_2025.xlsx
+        is_monthly_sales = bool(re.search(r"^(?:BanHang|DonHang|So_chi_tiet_ban_hang)", base_name, re.IGNORECASE) and year)
+
+        try:
+            wb = openpyxl.load_workbook(x_path, read_only=True)
+            sheet_names = wb.sheetnames
+        except Exception:
+            sheet_names = [None]
+
+        for s_name in sheet_names:
+            df = load_excel_sheet(x_path, sheet_name=s_name, default_year=year)
+            if df.empty:
+                continue
+
+            # Check if this is unit conversion table
+            norm_s = (s_name or "").lower()
+            norm_base = base_name.lower()
+            if any(k in norm_s or k in norm_base for k in ["quydoi", "quy_doi", "quy đổi", "banggia", "bang_gia"]):
+                bdata.unit_conversion = df
+
+            table_key = f"{base_name}_{s_name}" if s_name and len(sheet_names) > 1 else base_name
+            other_tables[table_key] = df
+
+            if is_monthly_sales:
+                monthly_sales_frames.append(df)
+
+    # Process CSV files
+    for cf in csv_files:
+        c_path = os.path.join(abs_dir, cf)
+        base_name = os.path.splitext(cf)[0]
+        year, month = extract_year_month_from_filename(cf)
+        df = load_csv_file(c_path, default_year=year)
+        if df.empty:
+            continue
+
+        if any(k in base_name.lower() for k in ["quydoi", "quy_doi", "quy đổi"]):
+            bdata.unit_conversion = df
+
+        other_tables[base_name] = df
+        if re.search(r"^(?:ban_hang|don_hang|so_ban_hang)", base_name, re.IGNORECASE):
+            monthly_sales_frames.append(df)
+
+    # Unify monthly sales if present into a master table "BanHang"
+    if monthly_sales_frames:
+        try:
+            unified_sales = pd.concat(monthly_sales_frames, ignore_index=True)
+            # Remove exact duplicate rows if any
+            unified_sales = unified_sales.drop_duplicates().reset_index(drop=True)
+            other_tables["BanHang"] = unified_sales
+        except Exception:
+            pass
+
+    bdata.tables = other_tables
+
+    # Detect date range across tables
+    min_date = None
+    max_date = None
+    for t_name, df in other_tables.items():
+        for col in df.columns:
+            if is_date_column_name(col):
+                date_vals = df[col].dropna().astype(str)
+                valid_dates = [d for d in date_vals if re.match(r"^\d{4}-\d{2}-\d{2}$", d)]
+                if valid_dates:
+                    cur_min = min(valid_dates)
+                    cur_max = max(valid_dates)
+                    min_date = cur_min if min_date is None or cur_min < min_date else min_date
+                    max_date = cur_max if max_date is None or cur_max > max_date else max_date
+
+    bdata.date_range = (min_date, max_date)
+
+    if use_cache:
+        _BUSINESS_CACHE[abs_dir] = bdata
+
+    return bdata
