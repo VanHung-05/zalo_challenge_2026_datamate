@@ -93,6 +93,7 @@ def run_pipeline(
     processed_count = 0
     with open(output_path, "w", encoding="utf-8") as out_f:
         for q in questions:
+            q_start = time.time()
             qid = q["id"]
             biz_id = q["business_id"]
             question_text = q["question"]
@@ -141,14 +142,24 @@ def run_pipeline(
             out_f.write(json.dumps(submission_row, ensure_ascii=False) + "\n")
             out_f.flush()
             processed_count += 1
+            q_dur = time.time() - q_start
 
-            if processed_count % 50 == 0 or processed_count == len(questions):
-                elapsed = time.time() - start_time
-                qps = processed_count / elapsed if elapsed > 0 else 0
-                print(f"Processed {processed_count}/{len(questions)} ({qps:.1f} q/s) - Elapsed: {elapsed:.1f}s")
+            # Real-time per-question logging
+            p_type = submission_row.get("type", "unknown")
+            ans_val = submission_row.get("answer") if p_type != "abstain" else submission_row.get("reason", "abstain")
+            ans_str = str(ans_val)
+            if len(ans_str) > 50:
+                ans_str = ans_str[:47] + "..."
+
+            q_short = question_text if len(question_text) <= 60 else question_text[:57] + "..."
+            print(f"[{processed_count}/{len(questions)}] [{biz_id}] ({q_dur:.1f}s) \"{q_short}\"", flush=True)
+            print(f"       -> [{p_type}]: {ans_str}", flush=True)
 
     total_elapsed = time.time() - start_time
-    print(f"Completed {processed_count} questions in {total_elapsed:.2f}s")
+    print(f"\n==========================================")
+    print(f"Completed {processed_count} questions in {total_elapsed:.2f}s ({processed_count / total_elapsed:.2f} q/s)")
+    print(f"Results saved to: {output_path}")
+    print(f"==========================================")
 
 
 def main():

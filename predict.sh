@@ -34,7 +34,7 @@ if [ -f ".venv/bin/python3" ]; then
     PYTHON_EXEC=".venv/bin/python3"
 fi
 
-$PYTHON_EXEC src/datamate/runner.py \
+$PYTHON_EXEC -u src/datamate/runner.py \
     --config "$CONFIG_FILE" \
     --data-dir "$DATA_DIR" \
     --output "$OUTPUT_FILE"

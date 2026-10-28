@@ -4,6 +4,7 @@ Generates schema cards, builds value indices for entity linking, and identifies 
 
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Set, Tuple
+import re
 import unicodedata
 import pandas as pd
 from rapidfuzz import process, fuzz
@@ -140,10 +141,16 @@ def profile_table(table_name: str, df: pd.DataFrame) -> SchemaCard:
 def build_value_index(tables: Dict[str, pd.DataFrame]) -> ValueIndex:
     """Build value index across text columns (products, categories, customers, etc.)."""
     entries = []
+    seen_entries = set()
     candidate_keywords = ["tên", "ten", "sản phẩm", "san_pham", "khách", "khach", "nhóm", "nhom", "mặt hàng", "loại", "thợ", "tho", "nhân viên", "nhan_vien", "nội dung"]
 
+    # If unified BanHang exists, skip the individual monthly slices
+    has_unified = "BanHang" in tables
+
     for tbl_name, df in tables.items():
-        # Skip internal duplicate or small redundant tables if needed
+        if has_unified and tbl_name != "BanHang" and re.search(r"^(?:BanHang|DonHang|So_chi_tiet_ban_hang)_T", tbl_name, re.IGNORECASE):
+            continue
+
         for col in df.columns:
             col_lower = str(col).lower()
             if any(k in col_lower for k in candidate_keywords) and not is_potential_join_key(str(col)):
@@ -151,10 +158,12 @@ def build_value_index(tables: Dict[str, pd.DataFrame]) -> ValueIndex:
                     unique_vals = df[col].dropna().unique()
                     for val in unique_vals:
                         v_str = str(val).strip()
-                        if not v_str or len(v_str) > 100:
+                        if not v_str or len(v_str) > 80:
                             continue
                         v_norm = unicodedata.normalize("NFC", v_str).lower()
-                        entries.append((v_norm, v_str, f"{tbl_name}.{col}"))
+                        if v_norm not in seen_entries:
+                            seen_entries.add(v_norm)
+                            entries.append((v_norm, v_str, f"{tbl_name}.{col}"))
                 except Exception:
                     continue
 
