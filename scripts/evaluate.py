@@ -206,7 +206,8 @@ def match_answer(predicted_item: Dict[str, Any], ground_truth: Dict[str, Any]) -
 def evaluate(
     predictions_path: str,
     ground_truth_path: str,
-    questions_path: Optional[str] = None
+    questions_path: Optional[str] = None,
+    only_predicted: bool = False
 ) -> Dict[str, Any]:
     # Load ground truth
     ground_truths: Dict[str, Dict[str, Any]] = {}
@@ -238,6 +239,10 @@ def evaluate(
                 continue
             item = json.loads(line)
             predictions[item["id"]] = item
+
+    # Scoring a partial run (e.g. --limit 300): keep only the questions that were predicted
+    if only_predicted:
+        ground_truths = {qid: gt for qid, gt in ground_truths.items() if qid in predictions}
 
     total_n = len(ground_truths)
     correct = 0
@@ -324,9 +329,11 @@ def main():
     parser.add_argument("--predictions", "-p", required=True, help="Path to submission.jsonl")
     parser.add_argument("--ground-truth", "-g", required=True, help="Path to answers.jsonl")
     parser.add_argument("--questions", "-q", default=None, help="Path to questions.jsonl (optional)")
+    parser.add_argument("--only-predicted", action="store_true",
+                        help="Score only questions present in predictions (for runs with --limit/--business)")
     args = parser.parse_args()
 
-    res = evaluate(args.predictions, args.ground_truth, args.questions)
+    res = evaluate(args.predictions, args.ground_truth, args.questions, args.only_predicted)
     print_report(res)
 
 

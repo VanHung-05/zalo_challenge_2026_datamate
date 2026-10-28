@@ -2,17 +2,23 @@ llm:
   backend: ollama
   model: "qwen2.5:7b"
   ollama_url: "http://localhost:11434"
+  num_ctx: 32768          # prompt = rulebook + README + schema (~10-20k tokens); Ollama default would truncate it
+  request_timeout: 300
   seed: 42
   temperature: 0.0
   max_tokens: 1024
 
 agent:
+  mode: sql               # sql: LLM writes DuckDB SQL (Phase 1 baseline) | pandas: LLM writes pandas code
   n_samples: 1
-  max_retries: 2
-  sandbox_timeout: 30
+  max_retries: 2          # self-debug rounds after the first attempt
+  sandbox_timeout: 30     # seconds per SQL query / pandas execution
+  sql_threads: 1          # DuckDB threads; 1 keeps results reproducible (Rule 8)
+  on_llm_unanswerable: unanswerable   # unanswerable | abstain (what to submit when the LLM says unanswerable)
   confidence_threshold: 0.5
 
 runner:
   parallel_workers: 1
+  group_by_business: true
   data_dir: "train"
   output_file: "submission.jsonl"

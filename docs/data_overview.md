@@ -1,0 +1,79 @@
+# Data Overview
+
+## Business types
+
+The data covers a wide range of Vietnamese small businesses: grocery stores, coffee and bubble-tea shops, restaurants, pharmacies, building-material stores, motorbike repair shops, mother-and-baby stores, and more. The private test includes business types that do not appear in the training or public test data.
+
+Each business covers 12–30 months of activity with seasonality (Tết, Mid-Autumn, public holidays, paydays, weekends) and ranges from a few hundred to about 300,000 rows.
+
+## Package structure
+
+```text
+<split>/
+├── data/<business_id>/
+│   ├── *.csv | *.xlsx | *.sqlite   # one or more data files
+│   └── README.md                   # business description and notes
+├── rulebook.md                     # default rules and vocabulary
+├── calendar.csv                    # solar–lunar calendar (Tết)
+├── questions.jsonl                 # one question per line
+└── answers.jsonl                   # training only
+```
+
+### Sample record in `questions.jsonl`
+
+```json
+{"id": "q_01234", "business_id": "biz_017", "question": "tháng này hàng nào bán chậm nhất, tồn nhiều mà bán ko dc", "as_of_date": "2026-08-27"}
+```
+
+Training businesses also come with an `answers.jsonl`, which contains the reference answer for every training question, linked by `id`. Each line follows the submission format, plus an `alias` field listing other accepted forms of a name answer (alternative spellings found in the data and the item code). Unanswerable questions have `"answer": null`. Submissions do not need to include the `alias` field.
+
+The quality of `README.md` varies: some businesses come with a full data dictionary, others with a few informal notes, some with nothing.
+
+### Sample record in `answers.jsonl`
+
+The reference answer for the example question in the Description section:
+
+```json
+{"id": "q_06de33fa21cc", "type": "string", "answer": "Xi măng Hà Tiên PCB40 bao 50kg", "alias": ["SP0001"]}
+```
+
+## Splits
+
+| Split | Businesses | Questions | Reference answers |
+|---|---:|---:|---|
+| Training | 30 | ~3,000 | Yes |
+| Public test | 10–20 | ~1,000 | Hidden; scored on the public leaderboard |
+| Private test | 10–20 | ~500 | Hidden; released at the private test phase; includes new business types |
+
+## Business rules (default interpretations)
+
+Each split ships its own rulebook (`rulebook.md`), which fixes the default meaning of common terms whenever the question does not say otherwise. The rulebook may differ between splits so your agent must read and apply the rulebook of the split it is answering, not a copy of the training rulebook.
+
+Typical rules:
+
+- **Revenue** = sum of line amounts after line-level discounts (order-level vouchers are not deducted), excluding VAT and delivery fees, excluding canceled orders and orders with any returned item.
+- **“Bán chạy”** = by quantity; a week runs Monday–Sunday; “tháng này” = the month containing the as-of date; “tồn kho” = quantity on hand; default cost = weighted-average purchase cost by lot; the Tết window = 23 tháng Chạp to mùng 10 (lunar calendar).
+
+## Submission format
+
+**Submission file:** In both rounds, upload a `submission.jsonl` file, one JSON object per line:
+
+```jsonl
+{"id": "q_01234", "type": "string", "answer": "Sting dâu 330ml"}
+{"id": "q_01235", "type": "number", "answer": 48250000}
+{"id": "q_01236", "type": "percent", "answer": -12.45}
+{"id": "q_01237", "type": "date", "answer": "2026-08-15"}
+{"id": "q_01238", "type": "boolean", "answer": true}
+{"id": "q_01239", "type": "list", "answer": ["Cà phê sữa", "Bạc xỉu", "Trà đào"]}
+{"id": "q_01240", "type": "table", "answer": {"columns": ["product", "branch", "sold", "stock"], "rows": [["Trà Ô long", 3200000], ["Anh Tú", 15000000]]}}
+{"id": "q_01241", "type": "unanswerable", "reason": "Dữ liệu không có giá vốn nên không tính được lợi nhuận"}
+{"id": "q_01242", "type": "abstain"}
+```
+
+Questions missing from the file are scored as abstain. The `reason` field is optional. The number of submissions per day follows the general regulations.
+
+## Docker image
+
+The image (see Competition rounds in the Rule section) must contain the source code (training and inference), the model weights and a `predict.sh` that reads the test set from `/data` and writes `/result/submission.jsonl`, together with a `README.md`.
+
+It should also write a per-question log to `/result/logs/`, in any format, containing at least the question ID, the final answer and the elapsed time—plus anything else that shows how the answer was reached (e.g. execution trace, execution output). The organizers use these logs to resolve differences between your uploaded result and their re-run (Rule 8).

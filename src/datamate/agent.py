@@ -126,7 +126,7 @@ def answer_question(
         # If code failed after retries, abstain to avoid -1 penalty
         return {"id": question_id, "type": "abstain"}
 
-    if final_result == "UNANSWERABLE":
+    if isinstance(final_result, str) and final_result == "UNANSWERABLE":
         return format_submission_item(question_id, "UNANSWERABLE", "unanswerable")
 
     # Format answer according to inferred type

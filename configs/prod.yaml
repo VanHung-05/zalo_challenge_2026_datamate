@@ -8,12 +8,17 @@ llm:
   max_tokens: 4096
 
 agent:
+  mode: sql
   n_samples: 3
   max_retries: 3
   sandbox_timeout: 30
+  sql_threads: 1
+  on_llm_unanswerable: unanswerable
   confidence_threshold: 0.5
 
 runner:
   parallel_workers: 4
+  group_by_business: true
+  logs_dir: "/result/logs"
   data_dir: "/data"
   output_file: "/result/submission.jsonl"
