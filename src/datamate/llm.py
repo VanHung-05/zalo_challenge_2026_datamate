@@ -21,6 +21,9 @@ class LLMWrapper:
 
         if self.backend == "ollama":
             self.base_url = llm_cfg.get("ollama_url", "http://localhost:11434")
+            # Ollama's default context (2k-4k tokens) silently truncates long prompts (rulebook + schema)
+            self.num_ctx = llm_cfg.get("num_ctx", 32768)
+            self.request_timeout = llm_cfg.get("request_timeout", 300)
             self.engine = None
         elif self.backend == "vllm":
             try:
@@ -59,15 +62,18 @@ class LLMWrapper:
                     "options": {
                         "temperature": temp,
                         "num_predict": max_tok,
+                        "num_ctx": self.num_ctx,
                         "seed": self.seed,
                         "stop": stop_tokens
                     },
                     "stream": False
                 }
                 try:
-                    resp = requests.post(f"{self.base_url}/api/generate", json=payload, timeout=120)
+                    resp = requests.post(f"{self.base_url}/api/generate", json=payload, timeout=self.request_timeout)
                     resp.raise_for_status()
                     data = resp.json()
+                    if data.get("prompt_eval_count", 0) >= self.num_ctx:
+                        print(f"[LLM Warning] prompt filled num_ctx={self.num_ctx}; it was likely truncated")
                     responses.append(data.get("response", ""))
                 except Exception as e:
                     print(f"[LLM Error] Ollama request failed: {e}")

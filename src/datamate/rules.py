@@ -48,12 +48,27 @@ class Rulebook:
 - PHẦN TRĂM: Là số %, làm tròn 2 chữ số thập phân (ví dụ: 12.34)."""
 
 
-_ACTIVE_RULEBOOK: Optional[Rulebook] = None
+_RULEBOOK_CACHE: Dict[str, Rulebook] = {}
+
+
+def find_rulebook_path(start_dir: str, max_up: int = 2) -> Optional[str]:
+    """Locate rulebook.md of the split: <split>/rulebook.md.
+    Accepts the split dir itself or a business dir (<split>/data/<business_id>), searching upwards.
+    """
+    cur = os.path.abspath(start_dir)
+    for _ in range(max_up + 1):
+        candidate = os.path.join(cur, "rulebook.md")
+        if os.path.exists(candidate):
+            return candidate
+        cur = os.path.dirname(cur)
+    return None
 
 
 def get_rulebook(data_dir: str) -> Rulebook:
-    global _ACTIVE_RULEBOOK
-    rb_path = os.path.join(data_dir, "rulebook.md")
-    if _ACTIVE_RULEBOOK is None or not _ACTIVE_RULEBOOK.raw_text:
-        _ACTIVE_RULEBOOK = Rulebook(rb_path)
-    return _ACTIVE_RULEBOOK
+    rb_path = find_rulebook_path(data_dir)
+    key = rb_path or ""
+    if key not in _RULEBOOK_CACHE:
+        if rb_path is None:
+            print(f"[Rules Warning] rulebook.md not found from {data_dir}")
+        _RULEBOOK_CACHE[key] = Rulebook(rb_path)
+    return _RULEBOOK_CACHE[key]

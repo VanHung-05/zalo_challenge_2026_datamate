@@ -37,20 +37,55 @@ def normalize_vietnamese_text(text: str) -> str:
     return text.strip()
 
 
-def parse_vietnamese_date(val: Any, default_year: Optional[int] = None) -> Optional[str]:
-    """Parse date from various formats into 'YYYY-MM-DD'."""
+EXCEL_EPOCH = datetime(1899, 12, 30)
+
+
+def _format_datetime(dt: datetime, keep_time: bool) -> str:
+    """'YYYY-MM-DD', or 'YYYY-MM-DD HH:MM:SS' when keep_time and the time is not midnight."""
+    if keep_time and (dt.hour or dt.minute or dt.second):
+        return dt.strftime("%Y-%m-%d %H:%M:%S")
+    return dt.strftime("%Y-%m-%d")
+
+
+def _excel_serial_to_datetime(num: float) -> Optional[datetime]:
+    """Excel serial day number (e.g. 45717 = 2025-03-01) -> datetime, only for plausible years (1954-2119)."""
+    if 20000 <= num <= 80000:
+        return EXCEL_EPOCH + pd.Timedelta(days=float(num)).to_pytimedelta()
+    return None
+
+
+def parse_vietnamese_date(val: Any, default_year: Optional[int] = None, keep_time: bool = False) -> Optional[str]:
+    """Parse date from various formats into 'YYYY-MM-DD' (or 'YYYY-MM-DD HH:MM:SS' if keep_time)."""
     if val is None or pd.isna(val):
         return None
-    if isinstance(val, (datetime, date, pd.Timestamp)):
+    if isinstance(val, (datetime, pd.Timestamp)):
+        return _format_datetime(val, keep_time)
+    if isinstance(val, date):
         return val.strftime("%Y-%m-%d")
+    if isinstance(val, (int, float, np.integer, np.floating)) and not isinstance(val, bool):
+        dt = _excel_serial_to_datetime(float(val))
+        # Not a plausible serial (e.g. "Số ngày nợ" = 30): keep the number as is
+        return _format_datetime(dt, keep_time) if dt else val
 
     s = str(val).strip()
     if not s:
         return None
 
-    # Already YYYY-MM-DD
-    if re.match(r"^\d{4}-\d{2}-\d{2}", s):
-        return s[:10]
+    # Excel serial stored as text: "45748" or "45717.0"
+    if re.match(r"^\d{5}(\.\d+)?$", s):
+        dt = _excel_serial_to_datetime(float(s))
+        if dt:
+            return _format_datetime(dt, keep_time)
+
+    # Already YYYY-MM-DD, optionally followed by a time
+    m_iso = re.match(r"^(\d{4}-\d{2}-\d{2})(?:[ T](\d{1,2}):(\d{2})(?::(\d{2}))?)?", s)
+    if m_iso:
+        if keep_time and m_iso.group(2):
+            dt = datetime.strptime(m_iso.group(1), "%Y-%m-%d").replace(
+                hour=int(m_iso.group(2)), minute=int(m_iso.group(3)), second=int(m_iso.group(4) or 0)
+            )
+            return _format_datetime(dt, keep_time)
+        return m_iso.group(1)
 
     # Vietnamese format: "1 thg 6 2025" or "15 tháng 1, 2025" or "31 thg 12, 2024"
     m_vn = re.search(r"(\d{1,2})\s+(?:thg|tháng)\s+(\d{1,2})(?:[,\s]+(\d{4}))?", s, re.IGNORECASE)
@@ -61,10 +96,16 @@ def parse_vietnamese_date(val: Any, default_year: Optional[int] = None) -> Optio
         if y:
             return f"{y:04d}-{m:02d}-{d:02d}"
 
-    # dd/mm/yyyy or dd-mm-yyyy or dd.mm.yyyy
-    m_dmy = re.match(r"^(\d{1,2})[/.-](\d{1,2})[/.-](\d{4})", s)
+    # dd/mm/yyyy or dd-mm-yyyy or dd.mm.yyyy, optionally followed by HH:MM[:SS]
+    m_dmy = re.match(r"^(\d{1,2})[/.-](\d{1,2})[/.-](\d{4})(?:\s+(\d{1,2}):(\d{2})(?::(\d{2}))?)?", s)
     if m_dmy:
         d, m, y = int(m_dmy.group(1)), int(m_dmy.group(2)), int(m_dmy.group(3))
+        if keep_time and m_dmy.group(4):
+            try:
+                dt = datetime(y, m, d, int(m_dmy.group(4)), int(m_dmy.group(5)), int(m_dmy.group(6) or 0))
+                return _format_datetime(dt, keep_time)
+            except ValueError:
+                pass
         return f"{y:04d}-{m:02d}-{d:02d}"
 
     # dd/mm without year
@@ -76,7 +117,7 @@ def parse_vietnamese_date(val: Any, default_year: Optional[int] = None) -> Optio
     # Fallback to pd.to_datetime
     try:
         ts = pd.to_datetime(s, dayfirst=True)
-        return ts.strftime("%Y-%m-%d")
+        return _format_datetime(ts, keep_time)
     except Exception:
         return s
 
@@ -124,7 +165,10 @@ def parse_vietnamese_number(val: Any) -> Any:
 
 def is_date_column_name(col_name: str) -> bool:
     norm = col_name.lower().strip()
-    date_keywords = ["ngày", "ngay", "date", "thời gian", "thoigian", "time", "hạn dùng", "han_dung", "kỳ", "ky"]
+    date_keywords = [
+        "ngày", "ngay", "date", "thời gian", "thoigian", "time", "hạn dùng", "han_dung",
+        "hạn sử dụng", "han_su_dung", "hansudung", "hsd", "kỳ", "ky"
+    ]
     return any(k in norm for k in date_keywords)
 
 
@@ -138,7 +182,7 @@ def is_numeric_column_name(col_name: str) -> bool:
     return any(k in norm for k in num_keywords)
 
 
-def clean_dataframe(df: pd.DataFrame, default_year: Optional[int] = None) -> pd.DataFrame:
+def clean_dataframe(df: pd.DataFrame, default_year: Optional[int] = None, keep_time: bool = False) -> pd.DataFrame:
     """Clean column names, filter summary rows, normalize dates and numbers (fast vectorized)."""
     if df.empty:
         return df
@@ -157,6 +201,14 @@ def clean_dataframe(df: pd.DataFrame, default_year: Optional[int] = None) -> pd.
     if df.empty:
         return df
 
+    # Drop header rows repeated inside the data (cells equal to their own column name)
+    header_hits = pd.Series(0, index=df.index)
+    for c in df.columns:
+        header_hits += (df[c].astype(str).str.strip() == c).astype(int)
+    is_repeated_header = header_hits >= max(2, (len(df.columns) + 1) // 2)
+    if is_repeated_header.any():
+        df = df[~is_repeated_header].reset_index(drop=True)
+
     # Vectorized filter for summary/total rows ("TỔNG", "TOTAL", etc.)
     summary_keywords = ("tổng", "tong", "total", "cộng", "cong")
     check_cols = df.columns[:min(4, len(df.columns))]
@@ -172,7 +224,7 @@ def clean_dataframe(df: pd.DataFrame, default_year: Optional[int] = None) -> pd.
     for col in df.columns:
         if is_date_column_name(col):
             try:
-                df[col] = df[col].apply(lambda x: parse_vietnamese_date(x, default_year))
+                df[col] = df[col].apply(lambda x: parse_vietnamese_date(x, default_year, keep_time))
             except Exception:
                 pass
         elif is_numeric_column_name(col):
@@ -193,7 +245,8 @@ def clean_dataframe(df: pd.DataFrame, default_year: Optional[int] = None) -> pd.
 def load_excel_sheet(
     filepath: str,
     sheet_name: Optional[str] = None,
-    default_year: Optional[int] = None
+    default_year: Optional[int] = None,
+    keep_time: bool = False
 ) -> pd.DataFrame:
     """Load an Excel sheet, detecting offset headers and trailing totals."""
     try:
@@ -233,17 +286,17 @@ def load_excel_sheet(
             padded_rows.append(r_list[:num_cols])
 
         df = pd.DataFrame(padded_rows, columns=headers)
-        return clean_dataframe(df, default_year)
+        return clean_dataframe(df, default_year, keep_time)
     except Exception as e:
         # Fallback to standard pandas read_excel
         try:
             df = pd.read_excel(filepath, sheet_name=sheet_name)
-            return clean_dataframe(df, default_year)
+            return clean_dataframe(df, default_year, keep_time)
         except Exception:
             return pd.DataFrame()
 
 
-def load_csv_file(filepath: str, default_year: Optional[int] = None) -> pd.DataFrame:
+def load_csv_file(filepath: str, default_year: Optional[int] = None, keep_time: bool = False) -> pd.DataFrame:
     """Load CSV with automatic encoding and separator detection."""
     encodings = ["utf-8-sig", "utf-8", "cp1258", "latin1"]
     for enc in encodings:
@@ -251,18 +304,18 @@ def load_csv_file(filepath: str, default_year: Optional[int] = None) -> pd.DataF
             try:
                 df = pd.read_csv(filepath, encoding=enc, sep=sep)
                 if df.shape[1] > 1:
-                    return clean_dataframe(df, default_year)
+                    return clean_dataframe(df, default_year, keep_time)
             except Exception:
                 continue
     # Fallback default
     try:
         df = pd.read_csv(filepath)
-        return clean_dataframe(df, default_year)
+        return clean_dataframe(df, default_year, keep_time)
     except Exception:
         return pd.DataFrame()
 
 
-def load_sqlite_file(filepath: str) -> Dict[str, pd.DataFrame]:
+def load_sqlite_file(filepath: str, keep_time: bool = False) -> Dict[str, pd.DataFrame]:
     """Load all tables from SQLite file into DataFrames."""
     tables = {}
     conn = sqlite3.connect(filepath)
@@ -272,7 +325,7 @@ def load_sqlite_file(filepath: str) -> Dict[str, pd.DataFrame]:
     for t_name in table_names:
         try:
             df = pd.read_sql_query(f'SELECT * FROM "{t_name}"', conn)
-            tables[t_name] = clean_dataframe(df)
+            tables[t_name] = clean_dataframe(df, keep_time=keep_time)
         except Exception:
             pass
     conn.close()
@@ -290,20 +343,24 @@ def extract_year_month_from_filename(filename: str) -> Tuple[Optional[int], Opti
     return None, None
 
 
-_BUSINESS_CACHE: Dict[str, BusinessData] = {}
+_BUSINESS_CACHE: Dict[Tuple[str, bool], BusinessData] = {}
 
 
 def load_business_data(
     business_dir: str,
     calendar_df: Optional[pd.DataFrame] = None,
-    use_cache: bool = True
+    use_cache: bool = True,
+    keep_time: bool = False
 ) -> BusinessData:
-    """Load and unify all data files for a specific business."""
+    """Load and unify all data files for a specific business.
+    keep_time=True keeps 'HH:MM:SS' in datetime columns (needed for hour/shift questions in SQL mode).
+    """
     abs_dir = os.path.abspath(business_dir)
     biz_id = os.path.basename(abs_dir)
+    cache_key = (abs_dir, keep_time)
 
-    if use_cache and abs_dir in _BUSINESS_CACHE:
-        return _BUSINESS_CACHE[abs_dir]
+    if use_cache and cache_key in _BUSINESS_CACHE:
+        return _BUSINESS_CACHE[cache_key]
 
     bdata = BusinessData(business_id=biz_id, data_dir=abs_dir, calendar=calendar_df)
 
@@ -324,12 +381,13 @@ def load_business_data(
 
     # Group monthly files
     monthly_sales_frames = []
+    monthly_sales_keys: List[str] = []
     other_tables: Dict[str, pd.DataFrame] = {}
 
     # Check for SQLite first
     for sq in sqlite_files:
         sq_path = os.path.join(abs_dir, sq)
-        sq_tables = load_sqlite_file(sq_path)
+        sq_tables = load_sqlite_file(sq_path, keep_time=keep_time)
         other_tables.update(sq_tables)
 
     # Process XLSX files
@@ -347,29 +405,41 @@ def load_business_data(
         except Exception:
             sheet_names = [None]
 
+        sheet_frames: List[Tuple[Optional[str], pd.DataFrame]] = []
         for s_name in sheet_names:
-            df = load_excel_sheet(x_path, sheet_name=s_name, default_year=year)
+            # Rulebook §8: a date without year takes the year of the sheet holding the row
+            sheet_year = extract_year_month_from_filename(s_name)[0] if s_name else None
+            df = load_excel_sheet(x_path, sheet_name=s_name, default_year=sheet_year or year, keep_time=keep_time)
             if df.empty:
                 continue
+            sheet_frames.append((s_name, df))
 
+        # Several sheets with identical columns (e.g. one sheet per month) -> one table named after the file;
+        # the "sheet" column keeps the sheet name (it may carry the month or the branch)
+        if len(sheet_frames) > 1 and all(list(df.columns) == list(sheet_frames[0][1].columns) for _, df in sheet_frames):
+            merged = pd.concat([df.assign(sheet=s_name) for s_name, df in sheet_frames], ignore_index=True)
+            sheet_frames = [(None, merged)]
+
+        for s_name, df in sheet_frames:
             # Check if this is unit conversion table
             norm_s = (s_name or "").lower()
             norm_base = base_name.lower()
             if any(k in norm_s or k in norm_base for k in ["quydoi", "quy_doi", "quy đổi", "banggia", "bang_gia"]):
                 bdata.unit_conversion = df
 
-            table_key = f"{base_name}_{s_name}" if s_name and len(sheet_names) > 1 else base_name
+            table_key = f"{base_name}_{s_name}" if s_name and len(sheet_frames) > 1 else base_name
             other_tables[table_key] = df
 
             if is_monthly_sales:
                 monthly_sales_frames.append(df)
+                monthly_sales_keys.append(table_key)
 
     # Process CSV files
     for cf in csv_files:
         c_path = os.path.join(abs_dir, cf)
         base_name = os.path.splitext(cf)[0]
         year, month = extract_year_month_from_filename(cf)
-        df = load_csv_file(c_path, default_year=year)
+        df = load_csv_file(c_path, default_year=year, keep_time=keep_time)
         if df.empty:
             continue
 
@@ -379,6 +449,7 @@ def load_business_data(
         other_tables[base_name] = df
         if re.search(r"^(?:ban_hang|don_hang|so_ban_hang)", base_name, re.IGNORECASE):
             monthly_sales_frames.append(df)
+            monthly_sales_keys.append(base_name)
 
     # Unify monthly sales if present into a master table "BanHang"
     if monthly_sales_frames:
@@ -387,6 +458,8 @@ def load_business_data(
             # Remove exact duplicate rows if any
             unified_sales = unified_sales.drop_duplicates().reset_index(drop=True)
             other_tables["BanHang"] = unified_sales
+            # Slices already contained in BanHang (SQL mode hides them from the prompt)
+            bdata.metadata["merged_into"] = {"BanHang": [k for k in monthly_sales_keys if k != "BanHang"]}
         except Exception:
             pass
 
@@ -409,6 +482,6 @@ def load_business_data(
     bdata.date_range = (min_date, max_date)
 
     if use_cache:
-        _BUSINESS_CACHE[abs_dir] = bdata
+        _BUSINESS_CACHE[cache_key] = bdata
 
     return bdata

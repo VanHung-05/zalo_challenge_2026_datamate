@@ -212,10 +212,12 @@ def format_submission_item(
     """Format final prediction item for submission.jsonl.
     Handles 'abstain' and 'unanswerable' as special types.
     """
-    if expected_type == "abstain" or raw_result is None or raw_result == "ABSTAIN":
+    # isinstance guard: `DataFrame == "ABSTAIN"` is element-wise and raises in a boolean context
+    is_str = isinstance(raw_result, str)
+    if expected_type == "abstain" or raw_result is None or (is_str and raw_result == "ABSTAIN"):
         return {"id": question_id, "type": "abstain"}
 
-    if expected_type == "unanswerable" or raw_result == "UNANSWERABLE":
+    if expected_type == "unanswerable" or (is_str and raw_result == "UNANSWERABLE"):
         return {
             "id": question_id,
             "type": "unanswerable",
