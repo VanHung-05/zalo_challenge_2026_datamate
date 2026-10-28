@@ -7,19 +7,18 @@ set -e
 
 DATA_DIR=${1:-/data}
 OUTPUT_FILE=${2:-/result/submission.jsonl}
-CONFIG_FILE=${CONFIG:-configs/prod.yaml}
-
-# If running locally and DATA_DIR does not exist, fallback to public_test
-if [ ! -d "$DATA_DIR" ]; then
-    if [ -d "public_test" ]; then
-        DATA_DIR="public_test"
-    elif [ -d "train" ]; then
-        DATA_DIR="train"
+# Default config selection:
+# If CONFIG is not set, use dev.yaml for local Mac, prod.yaml for container /data
+if [ -z "$CONFIG" ]; then
+    if [ "$DATA_DIR" = "/data" ] && [ -f "configs/prod.yaml" ]; then
+        CONFIG_FILE="configs/prod.yaml"
+    elif [ -f "configs/dev.yaml" ]; then
+        CONFIG_FILE="configs/dev.yaml"
+    else
+        CONFIG_FILE="configs/prod.yaml"
     fi
-fi
-
-if [ -f "configs/dev.yaml" ] && [ ! -f "$CONFIG_FILE" ]; then
-    CONFIG_FILE="configs/dev.yaml"
+else
+    CONFIG_FILE="$CONFIG"
 fi
 
 echo "=========================================="

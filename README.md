@@ -56,19 +56,26 @@ pip install -r requirements.txt
 PYTHONPATH=. pytest tests/
 ```
 
-### 3.3 Chạy Agent
-Chạy qua script entrypoint:
+### 3.3 Chạy Agent qua script entrypoint (`predict.sh`)
+
 ```bash
-./predict.sh [path/to/data] [path/to/submission.jsonl]
+# 1. Chạy tạo file nộp bài cho bộ public test:
+./predict.sh public_test submission.jsonl
+
+# 2. Hoặc chạy kiểm thử trên tập train:
+./predict.sh train submission.jsonl
+
+# 3. Chạy trên server BTC (container Docker tự động mount /data và ghi /result/submission.jsonl):
+./predict.sh /data /result/submission.jsonl
 ```
 
-Hoặc chạy trực tiếp với runner:
+Hoặc chạy trực tiếp với runner (cho phép lọc số câu, lọc shop):
 ```bash
-# Chạy trên tập train với config dev (Ollama)
-python src/datamate/runner.py --config configs/dev.yaml --data-dir train --output submission.jsonl
-
-# Chạy thử nghiệm nhanh 10 câu đầu
+# Chạy thử nghiệm nhanh 10 câu đầu của tập train:
 python src/datamate/runner.py --config configs/dev.yaml --data-dir train --limit 10 --output test_10.jsonl
+
+# Chạy thử trên 1 shop cụ thể (vd: biz_101):
+python src/datamate/runner.py --config configs/dev.yaml --data-dir train --business biz_101 --limit 5 --output test_biz101.jsonl
 ```
 
 ### 3.4 Chấm điểm
