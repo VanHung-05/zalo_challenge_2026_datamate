@@ -48,6 +48,21 @@ def write_question_log(logs_dir: Optional[str], qid: str, log: Dict[str, Any]) -
         print(f"[Warning] Failed to write log for {qid}: {e}")
 
 
+def abstain_reason(log: Dict[str, Any]) -> str:
+    """One-line cause of an abstain from the question log, so the console shows why without opening logs."""
+    if log.get("exception"):
+        return "exception: " + log["exception"].strip().splitlines()[-1]
+    if log.get("load_error"):
+        return "load_error: " + log["load_error"]
+    attempts = log.get("attempts") or []
+    if not attempts:
+        return "abstain (no LLM attempt; LLM not initialized?)"
+    last = attempts[-1]
+    if not last.get("llm_response"):
+        return f"abstain: empty LLM response x{len(attempts)} (check max_tokens / <think>)"
+    return f"abstain after {len(attempts)} attempts: {last.get('outcome') or last.get('error') or 'unknown'}"
+
+
 def run_pipeline(
     config_path: str,
     data_dir: str,
@@ -211,10 +226,10 @@ def run_pipeline(
 
             # Real-time per-question logging
             p_type = submission_row.get("type", "unknown")
-            ans_val = submission_row.get("answer") if p_type != "abstain" else submission_row.get("reason", "abstain")
+            ans_val = submission_row.get("answer") if p_type != "abstain" else abstain_reason(log)
             ans_str = str(ans_val)
-            if len(ans_str) > 50:
-                ans_str = ans_str[:47] + "..."
+            if len(ans_str) > 120:
+                ans_str = ans_str[:117] + "..."
 
             q_short = question_text if len(question_text) <= 60 else question_text[:57] + "..."
             print(f"[{processed_count}/{len(questions)}] [{biz_id}] ({q_dur:.1f}s) \"{q_short}\"", flush=True)
