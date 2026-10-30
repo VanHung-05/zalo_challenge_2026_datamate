@@ -148,18 +148,17 @@ class BusinessDB:
         self.conn.execute(f"SET threads = {int(threads)}").fetchall()
         self.tables: Dict[str, TableInfo] = {}
 
+        # {merged table: [source file names]} from the loader's split-file merge
         merged_into: Dict[str, List[str]] = business_data.metadata.get("merged_into", {})
-        hidden_originals = {k for keys in merged_into.values() for k in keys}
 
         used_tables: set = set()
         self.sql_name_of: Dict[str, str] = {}
         for original, df in business_data.tables.items():
             sql_name = to_sql_identifier(original, used_tables)
             self.sql_name_of[original] = sql_name
-            self._load_table(sql_name, original, df, hidden=original in hidden_originals)
+            self._load_table(sql_name, original, df, hidden=False)
         self.merged_into = {
-            self.sql_name_of[target]: [self.sql_name_of[k] for k in keys if k in self.sql_name_of]
-            for target, keys in merged_into.items() if target in self.sql_name_of
+            self.sql_name_of[target]: files for target, files in merged_into.items() if target in self.sql_name_of
         }
 
         if calendar_df is not None and not calendar_df.empty:
@@ -278,9 +277,9 @@ class BusinessDB:
             lines.extend(join_hints)
             lines.append("")
 
-        for target, parts in self.merged_into.items():
-            if parts:
-                lines.append(f"Các bảng {', '.join(parts)} là các phần đã gộp sẵn vào bảng {target}: dùng {target}.")
+        for target, files in self.merged_into.items():
+            if files:
+                lines.append(f"Bảng {target} đã gộp sẵn toàn bộ dữ liệu của các file {', '.join(files)}: dùng {target}.")
         return "\n".join(lines).strip()
 
     def execute(self, sql: str, timeout: float = 30, max_rows: int = 10000) -> Tuple[Optional[pd.DataFrame], Optional[str]]:

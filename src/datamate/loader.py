@@ -242,55 +242,95 @@ def clean_dataframe(df: pd.DataFrame, default_year: Optional[int] = None, keep_t
     return df
 
 
+def _rows_to_dataframe(all_rows: List[tuple], default_year: Optional[int] = None, keep_time: bool = False) -> pd.DataFrame:
+    """Raw sheet rows -> cleaned DataFrame, detecting offset headers and trailing totals."""
+    if not all_rows:
+        return pd.DataFrame()
+
+    # Find the header row (search first 10 rows for max non-null strings)
+    best_header_idx = 0
+    max_valid_cols = 0
+    for i in range(min(10, len(all_rows))):
+        row = all_rows[i]
+        valid_cols = [c for c in row if c is not None and str(c).strip() != ""]
+        # Exclude rows that look like report titles (e.g. single long string)
+        if len(valid_cols) > max_valid_cols:
+            max_valid_cols = len(valid_cols)
+            best_header_idx = i
+
+    headers = [str(c).strip() if c is not None else f"col_{idx}" for idx, c in enumerate(all_rows[best_header_idx])]
+    # Discard empty trailing column headers if all values are None
+    data_rows = all_rows[best_header_idx + 1 :]
+    if not data_rows:
+        return pd.DataFrame(columns=headers)
+
+    # Pad rows to length of headers
+    num_cols = len(headers)
+    padded_rows = []
+    for r in data_rows:
+        r_list = list(r)
+        if len(r_list) < num_cols:
+            r_list.extend([None] * (num_cols - len(r_list)))
+        padded_rows.append(r_list[:num_cols])
+
+    df = pd.DataFrame(padded_rows, columns=headers)
+    return clean_dataframe(df, default_year, keep_time)
+
+
+def load_excel_file(
+    filepath: str,
+    default_year: Optional[int] = None,
+    keep_time: bool = False
+) -> List[Tuple[Optional[str], pd.DataFrame]]:
+    """Load every sheet of a workbook as (sheet_name, DataFrame), opening the file once.
+    openpyxl read-only mode scans every sheet's XML on open, so opening per sheet is quadratic in sheet count.
+    Rulebook §8: a date without year takes the year of the sheet holding the row, else the file's year.
+    """
+    try:
+        wb = openpyxl.load_workbook(filepath, data_only=True, read_only=True)
+    except Exception:
+        # Fallback to standard pandas read_excel (first sheet)
+        try:
+            return [(None, clean_dataframe(pd.read_excel(filepath), default_year, keep_time))]
+        except Exception:
+            return []
+
+    sheets: List[Tuple[Optional[str], pd.DataFrame]] = []
+    try:
+        for s_name in wb.sheetnames:
+            sheet_year = extract_year_month_from_filename(s_name)[0] or default_year
+            try:
+                df = _rows_to_dataframe(list(wb[s_name].iter_rows(values_only=True)), sheet_year, keep_time)
+            except Exception:
+                try:
+                    df = clean_dataframe(pd.read_excel(filepath, sheet_name=s_name), sheet_year, keep_time)
+                except Exception:
+                    df = pd.DataFrame()
+            sheets.append((s_name, df))
+    finally:
+        wb.close()
+    return sheets
+
+
 def load_excel_sheet(
     filepath: str,
     sheet_name: Optional[str] = None,
     default_year: Optional[int] = None,
     keep_time: bool = False
 ) -> pd.DataFrame:
-    """Load an Excel sheet, detecting offset headers and trailing totals."""
+    """Load one Excel sheet (first sheet if sheet_name is None). Use load_excel_file to read all sheets."""
     try:
-        # Load raw values using openpyxl
         wb = openpyxl.load_workbook(filepath, data_only=True, read_only=True)
-        target_sheet = sheet_name if sheet_name else wb.sheetnames[0]
-        ws = wb[target_sheet]
-
-        all_rows = list(ws.iter_rows(values_only=True))
-        if not all_rows:
-            return pd.DataFrame()
-
-        # Find the header row (search first 10 rows for max non-null strings)
-        best_header_idx = 0
-        max_valid_cols = 0
-        for i in range(min(10, len(all_rows))):
-            row = all_rows[i]
-            valid_cols = [c for c in row if c is not None and str(c).strip() != ""]
-            # Exclude rows that look like report titles (e.g. single long string)
-            if len(valid_cols) > max_valid_cols:
-                max_valid_cols = len(valid_cols)
-                best_header_idx = i
-
-        headers = [str(c).strip() if c is not None else f"col_{idx}" for idx, c in enumerate(all_rows[best_header_idx])]
-        # Discard empty trailing column headers if all values are None
-        data_rows = all_rows[best_header_idx + 1 :]
-        if not data_rows:
-            return pd.DataFrame(columns=headers)
-
-        # Pad rows to length of headers
-        num_cols = len(headers)
-        padded_rows = []
-        for r in data_rows:
-            r_list = list(r)
-            if len(r_list) < num_cols:
-                r_list.extend([None] * (num_cols - len(r_list)))
-            padded_rows.append(r_list[:num_cols])
-
-        df = pd.DataFrame(padded_rows, columns=headers)
-        return clean_dataframe(df, default_year, keep_time)
-    except Exception as e:
+        try:
+            ws = wb[sheet_name if sheet_name else wb.sheetnames[0]]
+            all_rows = list(ws.iter_rows(values_only=True))
+        finally:
+            wb.close()
+        return _rows_to_dataframe(all_rows, default_year, keep_time)
+    except Exception:
         # Fallback to standard pandas read_excel
         try:
-            df = pd.read_excel(filepath, sheet_name=sheet_name)
+            df = pd.read_excel(filepath, sheet_name=sheet_name or 0)
             return clean_dataframe(df, default_year, keep_time)
         except Exception:
             return pd.DataFrame()
@@ -343,6 +383,50 @@ def extract_year_month_from_filename(filename: str) -> Tuple[Optional[int], Opti
     return None, None
 
 
+# Suffix that splits one table over files: _T1_2025, _Thang01_2026, _1, _2, _2026
+SPLIT_FILE_SUFFIX_RE = re.compile(r"(?:_(?:T|Thang)\d{1,2})?(?:_\d+)?$", re.IGNORECASE)
+
+
+def split_file_stem(base_name: str) -> str:
+    """BanHang_T1_2025 -> BanHang, So_chi_tiet_ban_hang_1 -> So_chi_tiet_ban_hang, DonHang_ChiTiet -> DonHang_ChiTiet."""
+    return SPLIT_FILE_SUFFIX_RE.sub("", base_name) or base_name
+
+
+def merge_split_files(tables: Dict[str, pd.DataFrame], parts: List[Tuple[str, str, Optional[str], bool]]) -> Dict[str, List[str]]:
+    """Concatenate, in place, tables split over files that share a split stem and have identical columns.
+    parts: (table_key, file name, sheet name, whole_file) per loaded table.
+    The split unit is a whole file (So_chi_tiet_ban_hang_1 + _2026) or one sheet of it
+    (sheet BanHang of BanHang_TongHop_2025 with 4 other sheets + BanHang_TongHop_2026 holding only BanHang).
+    Returns {merged table: [source file names]}.
+    Rows are kept as is (no de-duplication): identical line items in different files are distinct sales.
+    """
+    buckets: Dict[Tuple[str, Tuple[str, ...]], List[Tuple[str, str, Optional[str], bool]]] = {}
+    for key, fname, sheet, whole_file in parts:
+        stem = split_file_stem(os.path.splitext(fname)[0])
+        buckets.setdefault((stem, tuple(tables[key].columns)), []).append((key, fname, sheet, whole_file))
+
+    merged_into: Dict[str, List[str]] = {}
+    for (stem, _), members in buckets.items():
+        if len({fname for _, fname, _, _ in members}) < 2:
+            continue
+        sheets = {sheet for _, _, sheet, _ in members}
+        if all(whole for _, _, _, whole in members):
+            target = stem
+        elif len(sheets) == 1 and None not in sheets:
+            target = f"{stem}_{sheets.pop()}"
+        else:
+            target = f"{stem}_gop"
+        member_keys = [key for key, _, _, _ in members]
+        if target in tables and target not in member_keys:
+            target = f"{target}_gop"
+        merged = pd.concat([tables[k] for k in member_keys], ignore_index=True)
+        for k in member_keys:
+            del tables[k]
+        tables[target] = merged
+        merged_into[target] = [fname for _, fname, _, _ in members]
+    return merged_into
+
+
 _BUSINESS_CACHE: Dict[Tuple[str, bool], BusinessData] = {}
 
 
@@ -379,10 +463,9 @@ def load_business_data(
     xlsx_files = [f for f in all_files if f.endswith(".xlsx")]
     sqlite_files = [f for f in all_files if f.endswith(".sqlite") or f.endswith(".db")]
 
-    # Group monthly files
-    monthly_sales_frames = []
-    monthly_sales_keys: List[str] = []
     other_tables: Dict[str, pd.DataFrame] = {}
+    # (table_key, file name, sheet name, whole_file) of every table: input of the split-file merge
+    table_parts: List[Tuple[str, str, Optional[str], bool]] = []
 
     # Check for SQLite first
     for sq in sqlite_files:
@@ -396,23 +479,7 @@ def load_business_data(
         year, month = extract_year_month_from_filename(xf)
         base_name = os.path.splitext(xf)[0]
 
-        # Is this a monthly sales slice? e.g. BanHang_T1_2025.xlsx or BanHang_TongHop_2025.xlsx
-        is_monthly_sales = bool(re.search(r"^(?:BanHang|DonHang|So_chi_tiet_ban_hang)", base_name, re.IGNORECASE) and year)
-
-        try:
-            wb = openpyxl.load_workbook(x_path, read_only=True)
-            sheet_names = wb.sheetnames
-        except Exception:
-            sheet_names = [None]
-
-        sheet_frames: List[Tuple[Optional[str], pd.DataFrame]] = []
-        for s_name in sheet_names:
-            # Rulebook §8: a date without year takes the year of the sheet holding the row
-            sheet_year = extract_year_month_from_filename(s_name)[0] if s_name else None
-            df = load_excel_sheet(x_path, sheet_name=s_name, default_year=sheet_year or year, keep_time=keep_time)
-            if df.empty:
-                continue
-            sheet_frames.append((s_name, df))
+        sheet_frames = [(s, df) for s, df in load_excel_file(x_path, default_year=year, keep_time=keep_time) if not df.empty]
 
         # Several sheets with identical columns (e.g. one sheet per month) -> one table named after the file;
         # the "sheet" column keeps the sheet name (it may carry the month or the branch)
@@ -429,10 +496,7 @@ def load_business_data(
 
             table_key = f"{base_name}_{s_name}" if s_name and len(sheet_frames) > 1 else base_name
             other_tables[table_key] = df
-
-            if is_monthly_sales:
-                monthly_sales_frames.append(df)
-                monthly_sales_keys.append(table_key)
+            table_parts.append((table_key, xf, s_name, len(sheet_frames) == 1))
 
     # Process CSV files
     for cf in csv_files:
@@ -447,21 +511,11 @@ def load_business_data(
             bdata.unit_conversion = df
 
         other_tables[base_name] = df
-        if re.search(r"^(?:ban_hang|don_hang|so_ban_hang)", base_name, re.IGNORECASE):
-            monthly_sales_frames.append(df)
-            monthly_sales_keys.append(base_name)
+        table_parts.append((base_name, cf, None, True))
 
-    # Unify monthly sales if present into a master table "BanHang"
-    if monthly_sales_frames:
-        try:
-            unified_sales = pd.concat(monthly_sales_frames, ignore_index=True)
-            # Remove exact duplicate rows if any
-            unified_sales = unified_sales.drop_duplicates().reset_index(drop=True)
-            other_tables["BanHang"] = unified_sales
-            # Slices already contained in BanHang (SQL mode hides them from the prompt)
-            bdata.metadata["merged_into"] = {"BanHang": [k for k in monthly_sales_keys if k != "BanHang"]}
-        except Exception:
-            pass
+    # One table split over several files (BanHang_T1_2025 + BanHang_T2_2025, So_chi_tiet_ban_hang_1 + _2026)
+    # -> one table named after the shared stem; the slices are dropped so no query sees only part of the data
+    bdata.metadata["merged_into"] = merge_split_files(other_tables, table_parts)
 
     bdata.tables = other_tables
 

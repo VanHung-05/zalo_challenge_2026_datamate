@@ -1,7 +1,7 @@
 import openpyxl
 import pandas as pd
 
-from src.datamate.loader import clean_dataframe, load_business_data, parse_vietnamese_date
+from src.datamate.loader import clean_dataframe, load_business_data, parse_vietnamese_date, split_file_stem
 
 
 def test_parse_date_keeps_time_only_when_asked():
@@ -48,3 +48,52 @@ def test_load_business_merges_same_schema_sheets(tmp_path):
     t = bd.tables["HoaDon"]
     assert t["sheet"].tolist() == ["T01-2025", "T02-2025"]
     assert t["Thời gian"].tolist() == ["2025-01-05 08:30:00", "2025-02-03 15:00:00"]
+
+
+def test_split_file_stem():
+    assert split_file_stem("BanHang_T1_2025") == "BanHang"
+    assert split_file_stem("BanHang_Thang01_2026") == "BanHang"
+    assert split_file_stem("So_chi_tiet_ban_hang_1") == "So_chi_tiet_ban_hang"
+    assert split_file_stem("BanHang_TongHop_2026") == "BanHang_TongHop"
+    assert split_file_stem("DonHang_ChiTiet") == "DonHang_ChiTiet"
+
+
+def _save_sheets(path, sheets):
+    wb = openpyxl.Workbook()
+    wb.remove(wb.active)
+    for name, rows in sheets.items():
+        ws = wb.create_sheet(name)
+        for r in rows:
+            ws.append(r)
+    wb.save(path)
+
+
+def test_load_business_merges_table_split_over_files(tmp_path):
+    biz = tmp_path / "biz_x"
+    biz.mkdir()
+    header = ["Mã đơn", "Ngày", "Thành tiền"]
+    # A file without a year in its name must still be merged (it used to be left out of BanHang)
+    _save_sheets(biz / "So_ban_hang_1.xlsx", {"Sheet1": [header, ["A", "01/05/2025", 10], ["A", "01/05/2025", 10]]})
+    _save_sheets(biz / "So_ban_hang_2026.xlsx", {"Sheet1": [header, ["B", "02/01/2026", 20]]})
+    _save_sheets(biz / "DanhMuc.xlsx", {"Sheet1": [["Tên", "Giá"], ["X", 1]]})
+
+    bd = load_business_data(str(biz), use_cache=False)
+    assert sorted(bd.tables) == ["DanhMuc", "So_ban_hang"]
+    # Identical rows are distinct line items: kept
+    assert bd.tables["So_ban_hang"]["Mã đơn"].tolist() == ["A", "A", "B"]
+    assert bd.metadata["merged_into"] == {"So_ban_hang": ["So_ban_hang_1.xlsx", "So_ban_hang_2026.xlsx"]}
+
+
+def test_load_business_merges_sheet_split_over_files(tmp_path):
+    biz = tmp_path / "biz_x"
+    biz.mkdir()
+    header = ["Đơn số", "Ngày HĐ", "Tổng thanh toán"]
+    _save_sheets(biz / "BanHang_TongHop_2025.xlsx", {
+        "BanHang": [header, ["D1", "01/05/2025", 10]],
+        "BanHang_HangHoa": [["Mã", "Tên"], ["H1", "Bánh"]],
+    })
+    _save_sheets(biz / "BanHang_TongHop_2026.xlsx", {"BanHang": [header, ["D2", "02/01/2026", 20]]})
+
+    bd = load_business_data(str(biz), use_cache=False)
+    assert sorted(bd.tables) == ["BanHang_TongHop_2025_BanHang_HangHoa", "BanHang_TongHop_BanHang"]
+    assert bd.tables["BanHang_TongHop_BanHang"]["Đơn số"].tolist() == ["D1", "D2"]
