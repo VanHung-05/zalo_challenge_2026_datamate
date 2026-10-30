@@ -27,17 +27,24 @@ class LLMWrapper:
 
         if self.backend == "llama_cpp":
             try:
-                from llama_cpp import Llama
-            except ImportError:
-                raise ImportError("llama-cpp-python is not installed: pip install llama-cpp-python")
+                from llama_cpp import Llama, llama_supports_gpu_offload
+            except ImportError as e:
+                # Keep the original error: a failed CUDA build and a missing package look identical otherwise
+                raise ImportError(f"llama-cpp-python could not be imported ({e}); install it (see inference.ipynb cell 2b)") from e
             model_path = llm_cfg.get("model_path", "")
             if not os.path.isfile(model_path):
                 raise FileNotFoundError(f"GGUF model not found: {model_path} (run scripts/download_model.py)")
             self.n_ctx = llm_cfg.get("n_ctx", 32768)
+            n_gpu_layers = llm_cfg.get("n_gpu_layers", -1)
+            gpu_build = llama_supports_gpu_offload()
+            # A CPU-only build silently ignores n_gpu_layers, so say which device is actually used
+            if n_gpu_layers != 0 and not gpu_build:
+                print("[LLM Warning] llama-cpp-python was built without GPU support; running on CPU")
+            print(f"[LLM] llama.cpp device: {'GPU' if gpu_build and n_gpu_layers != 0 else 'CPU'}")
             self.engine = Llama(
                 model_path=model_path,
                 n_ctx=self.n_ctx,
-                n_gpu_layers=llm_cfg.get("n_gpu_layers", -1),  # -1: offload all layers if built with GPU support
+                n_gpu_layers=n_gpu_layers,  # -1: offload all layers if built with GPU support
                 n_threads=llm_cfg.get("n_threads"),
                 seed=self.seed,
                 verbose=llm_cfg.get("verbose", False),
