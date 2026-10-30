@@ -1,7 +1,7 @@
 llm:
   backend: llama_cpp      # llama_cpp (local GGUF) | ollama | vllm
-  model: "Qwen3.5-4B-Q4_K_M"
-  model_path: "model/Qwen3.5-4B-Q4_K_M.gguf"   # tải bằng: python scripts/download_model.py
+  model: "qwen2.5-coder-7b-instruct-q4_k_m"
+  model_path: "model/qwen2.5-coder-7b-instruct-q4_k_m.gguf"   # tải bằng: python scripts/download_model.py
   n_ctx: 32768            # prompt (rulebook + README + schema, ~10-20k tokens) + max_tokens phải lọt vào đây
   n_gpu_layers: -1        # -1 = đẩy hết lên GPU (nếu llama-cpp-python build có CUDA/Metal); 0 = chỉ CPU
   n_threads: null         # null = llama.cpp tự chọn

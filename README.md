@@ -6,7 +6,7 @@ Hệ thống AI Agent trả lời câu hỏi ngôn ngữ tự nhiên bằng ti�
 
 ## 1. Mô hình và Ràng buộc cuộc thi
 
-- **Môi trường Dev**: Qwen3.5-4B (GGUF Q4_K_M, `unsloth/Qwen3.5-4B-GGUF`, Apache-2.0) qua **llama-cpp-python**; hoặc Qwen2.5-7B qua Ollama
+- **Môi trường Dev**: Qwen2.5-Coder-7B-Instruct (GGUF Q4_K_M, 4.68 GB, `Qwen/Qwen2.5-Coder-7B-Instruct-GGUF`, Apache-2.0) qua **llama-cpp-python**; hoặc Qwen2.5-7B qua Ollama
 - **Môi trường Nộp bài (2×RTX 5090)**: Qwen2.5-14B-Instruct / Qwen3-14B qua **vLLM** (Tensor Parallelism = 2)
 - **Giới hạn tham số**: ≤ 15B tham số, chạy hoàn toàn offline (không gọi API bên ngoài)
 - **Thời gian suy luận**: Xử lý toàn bộ test set trong vòng dưới 3–4 tiếng (giới hạn tối đa 6 tiếng)
@@ -64,7 +64,7 @@ pip install -r requirements.txt    # cần pandas >= 2.0, duckdb >= 1.1
 Mặc định `configs/dev.yaml` dùng `backend: llama_cpp`: model GGUF chạy ngay trong tiến trình Python, không cần server.
 ```bash
 # 1. Tải model về thư mục model/ (đã .gitignore)
-python scripts/download_model.py          # mặc định: unsloth/Qwen3.5-4B-GGUF / Qwen3.5-4B-Q4_K_M.gguf
+python scripts/download_model.py          # mặc định: Qwen/Qwen2.5-Coder-7B-Instruct-GGUF / qwen2.5-coder-7b-instruct-q4_k_m.gguf
 
 # 2. llama-cpp-python: bản pip mặc định chỉ chạy CPU. Muốn dùng GPU thì cài bản build có GPU:
 #    Mac (Metal):  CMAKE_ARGS="-DGGML_METAL=on" pip install --force-reinstall --no-cache-dir llama-cpp-python
@@ -73,7 +73,7 @@ python scripts/download_model.py          # mặc định: unsloth/Qwen3.5-4B-GG
 ```
 Các khoá trong `llm:`: `model_path`, `n_ctx` (context), `n_gpu_layers` (`-1` = đẩy hết lên GPU, `0` = chỉ CPU), `n_threads`.
 Prompt của chế độ `sql` dài khoảng **23k–47k ký tự** (rulebook + README + schema). Nếu số token của prompt cộng `max_tokens` vượt `n_ctx`, `llm.py` in `[LLM Warning] prompt has ... tokens`; khi đó tăng `n_ctx` (tốn thêm RAM/VRAM cho KV cache).
-Qwen3.5 có thể sinh khối suy nghĩ `<think>…</think>` trước đáp án. Khối này được tự bỏ đi, nhưng vẫn tính vào `max_tokens`. Nếu log có `llm_response` rỗng hoặc bị cắt giữa chừng thì tăng `max_tokens`.
+Model dòng Qwen3.x (nếu đổi sang) có thể sinh khối suy nghĩ `<think>…</think>` trước đáp án. Khối này được tự bỏ đi, nhưng vẫn tính vào `max_tokens`. Nếu log có `llm_response` rỗng hoặc bị cắt giữa chừng thì tăng `max_tokens`.
 
 Muốn dùng Ollama như cũ: đặt `backend: ollama`, `model: "qwen2.5:7b"`, `ollama_url`, `num_ctx` (xem dòng chú thích trong `configs/dev.yaml`).
 

@@ -8,8 +8,8 @@ Usage:
 
 Env vars:
     HF_TOKEN          — HuggingFace access token (nếu repo cần auth)
-    HF_MODEL_ID       — repo id (mặc định: unsloth/Qwen3.5-4B-GGUF)
-    GGUF_FILE         — tên file GGUF (mặc định: Qwen3.5-4B-Q4_K_M.gguf)
+    HF_MODEL_ID       — repo id (mặc định: Qwen/Qwen2.5-Coder-7B-Instruct-GGUF)
+    GGUF_FILE         — tên file GGUF (mặc định: qwen2.5-coder-7b-instruct-q4_k_m.gguf)
     HF_LOCAL_DIR      — thư mục lưu (mặc định: model/)
 """
 import argparse
@@ -21,14 +21,14 @@ from huggingface_hub import hf_hub_download
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Download GGUF model from HuggingFace Hub")
-    parser.add_argument("--repo", default=None, help="HF repo id (default: $HF_MODEL_ID or unsloth/Qwen3.5-4B-GGUF)")
-    parser.add_argument("--file", default=None, help="GGUF filename (default: $GGUF_FILE or Qwen3.5-4B-Q4_K_M.gguf)")
+    parser.add_argument("--repo", default=None, help="HF repo id (default: $HF_MODEL_ID or Qwen/Qwen2.5-Coder-7B-Instruct-GGUF)")
+    parser.add_argument("--file", default=None, help="GGUF filename (default: $GGUF_FILE or qwen2.5-coder-7b-instruct-q4_k_m.gguf)")
     parser.add_argument("--dir", default=None, help="Local directory (default: $HF_LOCAL_DIR or model/)")
     parser.add_argument("--token", default=None, help="HF access token (default: $HF_TOKEN)")
     args = parser.parse_args()
 
-    repo = args.repo or os.getenv("HF_MODEL_ID", "").strip() or "unsloth/Qwen3.5-4B-GGUF"
-    filename = args.file or os.getenv("GGUF_FILE", "").strip() or "Qwen3.5-4B-Q4_K_M.gguf"
+    repo = args.repo or os.getenv("HF_MODEL_ID", "").strip() or "Qwen/Qwen2.5-Coder-7B-Instruct-GGUF"
+    filename = args.file or os.getenv("GGUF_FILE", "").strip() or "qwen2.5-coder-7b-instruct-q4_k_m.gguf"
     local_dir = args.dir or os.getenv("HF_LOCAL_DIR", "").strip() or "model"
     token = args.token or os.getenv("HF_TOKEN", "").strip() or None
 

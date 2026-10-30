@@ -13,7 +13,7 @@ THINK_BLOCK_RE = re.compile(r"<think>.*?(?:</think>|$)", re.DOTALL)
 class LLMWrapper:
     """Unified LLM inference interface.
     - Dev: Ollama + qwen2.5:7b / qwen3:8b over local REST API.
-    - Dev: llama-cpp-python + local GGUF file (e.g. model/Qwen3.5-4B-Q4_K_M.gguf), no server needed.
+    - Dev: llama-cpp-python + local GGUF file (e.g. model/qwen2.5-coder-7b-instruct-q4_k_m.gguf), no server needed.
     - Prod: vLLM + Qwen2.5-14B / Qwen3-14B with Tensor Parallelism on 2x RTX 5090.
     """
 
