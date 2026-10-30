@@ -10,3 +10,5 @@ outputs/
 !train/answers.jsonl
 !public_test/questions.jsonl
 logs/
+model/*
+!model/.gitkeep

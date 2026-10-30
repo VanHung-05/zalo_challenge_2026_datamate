@@ -6,7 +6,7 @@ Hệ thống AI Agent trả lời câu hỏi ngôn ngữ tự nhiên bằng ti�
 
 ## 1. Mô hình và Ràng buộc cuộc thi
 
-- **Môi trường Dev (MacBook M-series)**: Qwen2.5-7B / Qwen3-8B qua **Ollama** REST API (`http://localhost:11434`)
+- **Môi trường Dev**: Qwen3.5-4B (GGUF Q4_K_M, `unsloth/Qwen3.5-4B-GGUF`, Apache-2.0) qua **llama-cpp-python**; hoặc Qwen2.5-7B qua Ollama
 - **Môi trường Nộp bài (2×RTX 5090)**: Qwen2.5-14B-Instruct / Qwen3-14B qua **vLLM** (Tensor Parallelism = 2)
 - **Giới hạn tham số**: ≤ 15B tham số, chạy hoàn toàn offline (không gọi API bên ngoài)
 - **Thời gian suy luận**: Xử lý toàn bộ test set trong vòng dưới 3–4 tiếng (giới hạn tối đa 6 tiếng)
@@ -44,7 +44,7 @@ flowchart TD
 - **`src/datamate/rules.py`**: Đọc `rulebook.md` **của split đang chạy** (tìm ở `<split>/rulebook.md`, hoặc đi ngược lên từ thư mục business).
 - **`src/datamate/profiler.py`**, **`time_resolver.py`**, **`entity_linker.py`**, **`sandbox.py`**, **`agent.py`**: dùng cho chế độ `pandas` (chế độ `sql` chưa dùng time resolver và entity linker).
 - **`src/datamate/formatter.py`**: Định dạng đáp án theo rulebook §9 (number, percent, date, boolean, string, list, table, unanswerable, abstain).
-- **`src/datamate/llm.py`**: Dual backend wrapper (Ollama cho Mac, vLLM cho production GPU).
+- **`src/datamate/llm.py`**: Wrapper nhiều backend: llama.cpp GGUF (dev mặc định), Ollama, vLLM (production GPU).
 - **`src/datamate/runner.py`**: Vòng lặp chính. Xử lý câu hỏi theo nhóm business, ghi `submission.jsonl` từng dòng kèm flush, ghi log từng câu và chuyển sang abstain khi có lỗi.
 - **`scripts/evaluate.py`**: Chấm điểm theo công thức Penalized Accuracy (PA = (correct − wrong) / N; đúng +1, sai −1, abstain 0).
 - **`scripts/validate_submission.py`**: Kiểm tra định dạng `submission.jsonl` trước khi nộp.
@@ -60,14 +60,22 @@ source .venv/bin/activate          # Windows: .venv\Scripts\activate
 pip install -r requirements.txt    # cần pandas >= 2.0, duckdb >= 1.1
 ```
 
-### 3.2 Chuẩn bị LLM (dev, Ollama)
+### 3.2 Chuẩn bị LLM (dev, llama.cpp + GGUF)
+Mặc định `configs/dev.yaml` dùng `backend: llama_cpp`: model GGUF chạy ngay trong tiến trình Python, không cần server.
 ```bash
-# Cài Ollama: https://ollama.com, rồi:
-ollama pull qwen2.5:7b
-ollama serve                       # nếu Ollama chưa chạy nền
-curl http://localhost:11434/api/tags   # kiểm tra server đã lên
+# 1. Tải model về thư mục model/ (đã .gitignore)
+python scripts/download_model.py          # mặc định: unsloth/Qwen3.5-4B-GGUF / Qwen3.5-4B-Q4_K_M.gguf
+
+# 2. llama-cpp-python: bản pip mặc định chỉ chạy CPU. Muốn dùng GPU thì cài bản build có GPU:
+#    Mac (Metal):  CMAKE_ARGS="-DGGML_METAL=on" pip install --force-reinstall --no-cache-dir llama-cpp-python
+#    NVIDIA CUDA:  CMAKE_ARGS="-DGGML_CUDA=on"  pip install --force-reinstall --no-cache-dir llama-cpp-python
+#    Windows cần Visual Studio Build Tools (C++) nếu pip phải build từ source.
 ```
-Prompt của chế độ `sql` dài khoảng **23k–47k ký tự** (đo trên 14 business của public_test), vì chứa toàn bộ rulebook, README và schema. `configs/dev.yaml` đặt `num_ctx: 32768`. Nếu prompt vượt context, `llm.py` in cảnh báo `[LLM Warning] prompt filled num_ctx`. Khi thấy cảnh báo này thì tăng `num_ctx` (tốn thêm RAM/VRAM). Số token thực tế phụ thuộc tokenizer, nên hãy xem `prompt_eval_count` trong lần chạy đầu.
+Các khoá trong `llm:`: `model_path`, `n_ctx` (context), `n_gpu_layers` (`-1` = đẩy hết lên GPU, `0` = chỉ CPU), `n_threads`.
+Prompt của chế độ `sql` dài khoảng **23k–47k ký tự** (rulebook + README + schema). Nếu số token của prompt cộng `max_tokens` vượt `n_ctx`, `llm.py` in `[LLM Warning] prompt has ... tokens`; khi đó tăng `n_ctx` (tốn thêm RAM/VRAM cho KV cache).
+Qwen3.5 có thể sinh khối suy nghĩ `<think>…</think>` trước đáp án. Khối này được tự bỏ đi, nhưng vẫn tính vào `max_tokens`. Nếu log có `llm_response` rỗng hoặc bị cắt giữa chừng thì tăng `max_tokens`.
+
+Muốn dùng Ollama như cũ: đặt `backend: ollama`, `model: "qwen2.5:7b"`, `ollama_url`, `num_ctx` (xem dòng chú thích trong `configs/dev.yaml`).
 
 ### 3.3 Chạy bộ test unit
 ```bash

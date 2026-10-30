@@ -1,13 +1,19 @@
-"""LLM Wrapper supporting dual backends: Ollama (dev on Mac) and vLLM (prod on GPU).
+"""LLM Wrapper supporting backends: llama.cpp GGUF (local dev), Ollama (dev on Mac) and vLLM (prod on GPU).
 """
 
+import os
+import re
 from typing import Any, Dict, List, Optional
 import requests
+
+# Qwen3.x may emit a reasoning block before the answer; only the answer is parsed downstream
+THINK_BLOCK_RE = re.compile(r"<think>.*?(?:</think>|$)", re.DOTALL)
 
 
 class LLMWrapper:
     """Unified LLM inference interface.
     - Dev: Ollama + qwen2.5:7b / qwen3:8b over local REST API.
+    - Dev: llama-cpp-python + local GGUF file (e.g. model/Qwen3.5-4B-Q4_K_M.gguf), no server needed.
     - Prod: vLLM + Qwen2.5-14B / Qwen3-14B with Tensor Parallelism on 2x RTX 5090.
     """
 
@@ -19,7 +25,24 @@ class LLMWrapper:
         self.default_temp = llm_cfg.get("temperature", 0.0)
         self.default_max_tokens = llm_cfg.get("max_tokens", 4096)
 
-        if self.backend == "ollama":
+        if self.backend == "llama_cpp":
+            try:
+                from llama_cpp import Llama
+            except ImportError:
+                raise ImportError("llama-cpp-python is not installed: pip install llama-cpp-python")
+            model_path = llm_cfg.get("model_path", "")
+            if not os.path.isfile(model_path):
+                raise FileNotFoundError(f"GGUF model not found: {model_path} (run scripts/download_model.py)")
+            self.n_ctx = llm_cfg.get("n_ctx", 32768)
+            self.engine = Llama(
+                model_path=model_path,
+                n_ctx=self.n_ctx,
+                n_gpu_layers=llm_cfg.get("n_gpu_layers", -1),  # -1: offload all layers if built with GPU support
+                n_threads=llm_cfg.get("n_threads"),
+                seed=self.seed,
+                verbose=llm_cfg.get("verbose", False),
+            )
+        elif self.backend == "ollama":
             self.base_url = llm_cfg.get("ollama_url", "http://localhost:11434")
             # Ollama's default context (2k-4k tokens) silently truncates long prompts (rulebook + schema)
             self.num_ctx = llm_cfg.get("num_ctx", 32768)
@@ -52,6 +75,28 @@ class LLMWrapper:
         temp = temperature if temperature is not None else self.default_temp
         max_tok = max_tokens if max_tokens is not None else self.default_max_tokens
         stop_tokens = stop if stop is not None else ["```\n\n", "User:", "<|im_end|>"]
+
+        if self.backend == "llama_cpp":
+            responses = []
+            for _ in range(n):
+                try:
+                    n_prompt = len(self.engine.tokenize(prompt.encode("utf-8"), add_bos=False))
+                    if n_prompt + max_tok > self.n_ctx:
+                        print(f"[LLM Warning] prompt has {n_prompt} tokens + max_tokens {max_tok} > n_ctx={self.n_ctx}")
+                    # Chat API applies the chat template embedded in the GGUF file
+                    out = self.engine.create_chat_completion(
+                        messages=[{"role": "user", "content": prompt}],
+                        temperature=temp,
+                        max_tokens=max_tok,
+                        stop=stop_tokens,
+                        seed=self.seed,
+                    )
+                    text = out["choices"][0]["message"].get("content") or ""
+                    responses.append(THINK_BLOCK_RE.sub("", text).strip())
+                except Exception as e:
+                    print(f"[LLM Error] llama.cpp generation failed: {e}")
+                    responses.append("")
+            return responses
 
         if self.backend == "ollama":
             responses = []

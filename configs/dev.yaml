@@ -1,12 +1,14 @@
 llm:
-  backend: ollama
-  model: "qwen2.5:7b"
-  ollama_url: "http://localhost:11434"
-  num_ctx: 32768          # prompt = rulebook + README + schema (~10-20k tokens); Ollama default would truncate it
-  request_timeout: 300
+  backend: llama_cpp      # llama_cpp (local GGUF) | ollama | vllm
+  model: "Qwen3.5-4B-Q4_K_M"
+  model_path: "model/Qwen3.5-4B-Q4_K_M.gguf"   # tải bằng: python scripts/download_model.py
+  n_ctx: 32768            # prompt (rulebook + README + schema, ~10-20k tokens) + max_tokens phải lọt vào đây
+  n_gpu_layers: -1        # -1 = đẩy hết lên GPU (nếu llama-cpp-python build có CUDA/Metal); 0 = chỉ CPU
+  n_threads: null         # null = llama.cpp tự chọn
   seed: 42
   temperature: 0.0
   max_tokens: 1024
+  # Ollama (cách cũ): backend: ollama, model: "qwen2.5:7b", ollama_url: "http://localhost:11434", num_ctx: 32768
 
 agent:
   mode: sql               # sql: LLM writes DuckDB SQL (Phase 1 baseline) | pandas: LLM writes pandas code
