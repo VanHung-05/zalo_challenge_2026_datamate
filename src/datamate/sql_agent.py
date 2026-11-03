@@ -21,7 +21,8 @@ from src.datamate.time_resolver import resolve_time
 VALID_TYPES = ["number", "percent", "string", "date", "boolean", "list", "table", "unanswerable", "explore"]
 SCALAR_TYPES = {"number", "percent", "string", "date", "boolean"}
 WEEKDAYS_VI = ["Thứ Hai", "Thứ Ba", "Thứ Tư", "Thứ Năm", "Thứ Sáu", "Thứ Bảy", "Chủ nhật"]
-MAX_README_CHARS = 6000
+MAX_README_CHARS = 4000
+MAX_RULEBOOK_CHARS = 10000
 MAX_LOGGED_RESPONSE_CHARS = 4000
 
 INSTRUCTIONS = """Bạn là chuyên gia phân tích dữ liệu cho cửa hàng nhỏ ở Việt Nam. Nhiệm vụ: viết MỘT câu truy vấn SQL (DuckDB) trên dữ liệu của cửa hàng để trả lời câu hỏi. Mọi con số phải do SQL tính ra.
@@ -97,7 +98,15 @@ def build_sql_prompt(
     if len(readme) > MAX_README_CHARS:
         readme = readme[:MAX_README_CHARS] + "\n..."
 
-    prompt = INSTRUCTIONS.format(rulebook=(rulebook_text or "(không có rulebook)").strip())
+    rulebook_trimmed = (rulebook_text or "(không có rulebook)").strip()
+    if len(rulebook_trimmed) > MAX_RULEBOOK_CHARS:
+        rulebook_trimmed = (
+            rulebook_trimmed[:MAX_RULEBOOK_CHARS // 2]
+            + "\n\n...(lược bớt phần giữa)...\n\n"
+            + rulebook_trimmed[-(MAX_RULEBOOK_CHARS // 2):]
+        )
+
+    prompt = INSTRUCTIONS.format(rulebook=rulebook_trimmed)
     prompt += BUSINESS_SECTION.format(readme=readme, schema=schema_text)
     prompt += QUESTION_SECTION.format(
         as_of_date=as_of_date, weekday=weekday, question=question, hints=f"{hints}\n" if hints else ""
@@ -372,6 +381,8 @@ def build_hints(a: Any, entity_hits: Optional[List[Any]] = None) -> str:
             lines.append(f"- Tình trạng tính đến hết ngày {t.point_in_time} (mọi phát sinh từ đầu dữ liệu đến hết ngày đó)")
         if t.shift:
             lines.append(f"- Chỉ lấy đơn ca {'sáng' if t.shift == 'morning' else 'chiều'} (theo giờ tạo đơn)")
+    elif t.primary:
+        lines.append(f"- Kỳ hỏi (tham khảo): từ {t.primary.start} đến {t.primary.end} (gồm cả 2 ngày)")
     lines.append(f"- Kiểu đáp án dự kiến: {a.answer_type}" + (f" ({'yyyy-mm' if a.date_granularity == 'month' else 'yyyy-mm-dd'})" if a.answer_type == "date" else ""))
     if a.top_k:
         lines.append(f"- Số phần tử cần trả: {a.top_k} (ít hơn thì trả hết); bằng nhau thì theo mã tăng dần")

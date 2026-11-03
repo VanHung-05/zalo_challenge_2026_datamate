@@ -20,7 +20,9 @@
   "orders_min_revenue": 0.9385,
   "product_group_revenue_share": 0.9293,
   "product_group_revenue": 0.9121,
-  "product_revenue_share": 0.0
+  "product_revenue_share": 0.0,
+  "completed_count": 0.95,
+  "distinct_customers": 0.95
  },
  "support": {
   "order_count": 177,

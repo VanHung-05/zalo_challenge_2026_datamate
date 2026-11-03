@@ -12,7 +12,7 @@ agent:
   pipeline: v2            # v2: Business Card + semantic layer + fast path + Guard + calibrated decision | v1: single-shot SQL
   n_samples: 3
   max_retries: 3
-  sandbox_timeout: 30
+  sandbox_timeout: 60
   sql_threads: 1
   on_llm_unanswerable: unanswerable
   sample_temperature: 0.7  # self-consistency samples 2..n (sample 1 is greedy); seed = llm.seed + i

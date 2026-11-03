@@ -29,7 +29,7 @@ HEURISTIC_PRIORS = {
 
 # Risk flags that force abstain whatever the score (plan §4.7 "veto cứng")
 HARD_VETO_FLAGS = {
-    "candidates_disagree", "entity_ambiguous", "sandbox_timeout", "rule_uncertain",
+    "candidates_disagree", "entity_ambiguous", "rule_uncertain",
     "low_confidence_role", "type_mismatch",
 }
 
@@ -183,6 +183,8 @@ def heuristic_p_value(top: List[Candidate]) -> float:
     p += HEURISTIC_PRIORS["per_extra_agreeing"] * (len(top) - 1)
     if not all(c.checks_ok for c in top):
         p -= 0.3
+    if any("sandbox_timeout" in c.flags for c in top):
+        p -= 0.15
     return max(0.0, min(0.97, p))
 
 

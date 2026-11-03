@@ -79,11 +79,11 @@ def _has(a: QuestionAnalysis, pattern: str) -> bool:
 
 
 REV = r"doanh thu|dthu|\bban (duoc|dc|ra)?.{0,20}\btien\b|tien (ban|hang)|thu ve|revenue|bao nhieu tien|nhieu tien|chi tieu|chi nhieu|tong tien"
-EXCLUDE_TOTAL = (r"trung binh|binh quan|moi don|1 don|mot don|nhom|thanh toan|tien mat|chuyen khoan|vi dien tu|\bcod\b|kenh|"
-                 r"zalo|dien thoai|tai quay|online|san|khach|nhan vien|tho\b|gia von|lai|loi nhuan|nhap|no\b|cong no|ton|"
-                 r"phi|voucher|giam|vat|thue|ca sang|ca chieu|size|ly|lon|chai|hop|goi|kg|nguyen|le\b|tra hang|huy|"
-                 r"chenh|so voi|so vs|tang|giam|%|phan tram|ti le|ti trong|chiem|moi ngay|moi thang|lan luot|tung|"
-                 r"hoat chat|ke don|thuoc co|cac thuoc|loai|danh muc|mat hang|san pham|\bsp\b|\bmon\b|thu \d|chu nhat|cuoi tuan")
+EXCLUDE_TOTAL = (r"trung binh|binh quan|moi don|1 don|mot don|\bnhom\b|thanh toan|tien mat|chuyen khoan|vi dien tu|\bcod\b|\bkenh\b|"
+                 r"zalo|dien thoai|tai quay|online|\bsan\b|khach|nhan vien|\btho\b|gia von|\blai\b|loi nhuan|\bnhap\b|cat hang|\bno\b|cong no|\bton\b|"
+                 r"\bphi\b|voucher|\bvat\b|\bthue\b|ca sang|ca chieu|\bsize\b|\bly\b|\blon\b|\bchai\b|\bhop\b|\bgoi\b|\bkg\b|\bnguyen\b|\ble\b|tra hang|\bhuy\b|"
+                 r"\bchenh\b|so voi|so vs|\btang\b|\bgiam\b|%|phan tram|ti le|ti trong|chiem|moi ngay|moi thang|lan luot|\btung\b|"
+                 r"hoat chat|ke don|thuoc co|cac thuoc|\bloai\b|danh muc|mat hang|san pham|\bsp\b|\bmon\b|thu \d|chu nhat|cuoi tuan")
 
 
 def intent_total_revenue(a, card, sem, ents) -> Optional[FastAnswer]:
@@ -263,9 +263,36 @@ def intent_monthly_series(a, card, sem, ents) -> Optional[FastAnswer]:
     return None
 
 
+def intent_order_count_with_state(a, card, sem, ents) -> Optional[FastAnswer]:
+    """Đơn thành công / hoàn thành trong kỳ."""
+    if a.answer_type != "number" or not a.time.primary or a.time.compare or ents or a.thresholds:
+        return None
+    if not _has(a, r"\b(so|bao nhieu|may|dem|bn|bnhiu)\s+(don|hoa don|bill)\b"):
+        return None
+    if _has(a, r"\bhuy\b|tra hang"):
+        return None
+    if _has(a, r"thanh cong|hoan thanh|da giao"):
+        r = sem.order_count(a.time.primary, a.as_of, states=("completed",), shift=a.time.shift)
+        return FastAnswer("completed_count", r.value, "number", False, r.evidence)
+    return None
+
+
+def intent_distinct_customer_count(a, card, sem, ents) -> Optional[FastAnswer]:
+    """Số khách hàng mua trong kỳ."""
+    if a.answer_type != "number" or not a.time.primary or a.time.compare or ents or a.thresholds:
+        return None
+    if not _has(a, r"\b(so|bao nhieu|may|dem|bn|bnhiu)\s+khach\b"):
+        return None
+    if _has(a, r"chi tieu|mua nhieu|don gia|\bnhom\b|\bno\b|cong no|tra gop|gop|qua han|quen|sop|moi don|trung binh"):
+        return None
+    r = sem.distinct_count("customer", a.time.primary, a.as_of)
+    return FastAnswer("distinct_customers", r.value, "number", False, r.evidence)
+
+
 INTENTS: List[Callable] = [
     intent_monthly_series, intent_cancel_rate, intent_growth, intent_aov, intent_count_with_threshold,
     intent_best_period, intent_top_customers, intent_top_products, intent_entity_revenue,
+    intent_order_count_with_state, intent_distinct_customer_count,
     intent_order_count, intent_total_revenue,
 ]
 
