@@ -15,7 +15,22 @@ Hệ thống AI Agent trả lời câu hỏi ngôn ngữ tự nhiên bằng ti�
 
 ## 2. Kiến trúc Pipeline
 
-Pipeline có hai chế độ, chọn bằng `agent.mode` trong config:
+### 2.0 Pipeline v2 (mặc định: `agent.mode: sql`, `agent.pipeline: v2`) — `plan.md` mục 4.1–4.8
+
+| Bước | Module | Việc làm |
+|---|---|---|
+| 4.1 Ingestion & Business Card | `loader.py`, `business_card.py` | Đọc xlsx bằng python-calamine (nhanh ~10×, giá trị giống openpyxl), gộp file tách (`_1`, `_2026`, `_T5_2025`, `_TongHop_2025_<sheet>`) theo gốc tên + bộ cột, **không** xoá dòng trùng khi gộp; kế thừa ô trống của nhóm dòng (rulebook §8) phát hiện từ bố cục; nhận dạng số Việt theo giá trị cột (`1.250.000`, `1,25tr`, `1tr090`, `250k`). Business Card: vai trò cột (README + tên cột + giá trị), sales model (bảng dòng/bảng đơn/danh mục nối theo mã hoặc tên), bảng quy đổi đơn vị, khoảng ngày có dữ liệu, capability map, danh sách thực thể |
+| 4.2 Rulebook & Calendar | `rules.py` | Toàn văn rulebook của split vào prompt + tham số parse được (`RuleParam.found`); tham số không có trong rulebook của split → câu phụ thuộc nó abstain. Kiểm tra `calendar.csv` |
+| 4.3 Question Understanding | `text_norm.py`, `question.py`, `time_resolver.py` | Chuẩn hoá teencode/telex, kỳ hỏi + kỳ so (tháng này vs cùng số ngày tháng trước, Tết, ca…), kiểu đáp án, top-k, ngưỡng, concept |
+| 4.4 Semantic layer | `semantic.py`, `fast_path.py` | Bảng `sl_lines`/`sl_orders` đã áp luật (huỷ, trả một phần → bỏ cả đơn, dòng trùng cùng đơn, ngày đặt); hàm `revenue/order_count/cancel_rate/rank/period_compare/...`; thiếu dữ liệu → `CapabilityMissing`, trạng thái chưa rõ → `SemanticUncertain` (không đoán). Fast path cho các dạng câu phổ biến |
+| 4.5 Program synthesis | `sql_agent.py` (`generate_sql_candidates`) | Prompt có Business Card, view `sl_*`, gợi ý đã tính; bước `explore`; N mẫu (mẫu 1 greedy, các mẫu sau seed `llm.seed+i`) |
+| 4.6 Answerability Guard | `guard.py` | Câu chủ quan/kiến thức ngoài/dự báo; concept thiếu trong capability map; kỳ ngoài khoảng dữ liệu (chỉ khi khoảng dữ liệu khớp ngày cuối ghi trong README) |
+| 4.7 Decision | `decision.py`, `scoring.py` | Gom candidate theo đúng luật so khớp của BTC, `p_v`/`p_u`, ngưỡng `tau`, veto cứng → abstain; calibrator JSON (`scripts/train_calibrator.py`) |
+| 4.8 Formatter & ghi kết quả | `formatter.py`, `writer.py`, `runner.py` | Làm tròn half-up một lần (Decimal), percent không tự nhân 100, `yyyy-mm` cho câu theo tháng; ghi + fsync từng dòng, `--resume`, log `/result/logs/<id>.json`, watchdog thời gian |
+
+**Đo trên train (không LLM, `--no-llm`):** PA **+0.533** (đúng 1613, sai 15, abstain 1372; trả lời 54%, đúng 99,1% trên câu đã trả lời). Đây là số **in-sample**: luật được sửa khi nhìn lỗi trên chính train, nên trên business mới sẽ thấp hơn. Trên public test (không có đáp án) pipeline chạy hết 1000 câu, trả lời ~24%, file hợp lệ. Phần LLM (4.5) **chưa được chạy với model thật** (máy dev không có model); prior của LLM và `tau` là giá trị đặt tay, cần hiệu chỉnh bằng `scripts/train_calibrator.py` sau một lần chạy có LLM trên train.
+
+Các chế độ cũ, chọn bằng `agent.mode` / `agent.pipeline: v1`:
 
 - **`sql`** (mặc định trong `configs/*.yaml`, baseline Giai đoạn 1 của `plan.md`): LLM viết **một câu SQL DuckDB**, mọi con số do SQL tính ra.
 - **`pandas`** (chế độ cũ): LLM viết code pandas, chạy trong `sandbox.py`.
@@ -109,6 +124,18 @@ Riêng phần nạp dữ liệu 14 business của public_test mất khoảng **4
 ./predict.sh /data /result/submission.jsonl    # tự chọn configs/prod.yaml; log ghi vào /result/logs/
 ```
 Docker image chưa được dựng (Giai đoạn 6 của `plan.md`). Nhánh vLLM trong `llm.py` cũng chưa được chạy thử.
+
+### 3.7b Đánh giá và hiệu chỉnh các thành phần (không cần LLM trừ calibrator)
+```bash
+python src/datamate/runner.py -c configs/dev.yaml -d train --no-llm -o outputs/train_nollm/submission.jsonl
+python scripts/evaluate.py -p outputs/train_nollm/submission.jsonl -g train/answers.jsonl -q train/questions.jsonl
+python scripts/eval_fast_path.py -d train --priors-out configs/fast_path_priors.json   # precision từng intent (cận dưới Wilson)
+python scripts/train_guard.py -d train            # precision/recall của "unanswerable" theo từng tín hiệu
+python scripts/eval_question_understanding.py     # kiểu đáp án, top-k, thời gian
+# sau một lần chạy CÓ LLM trên train:
+python scripts/train_calibrator.py --logs outputs/train_full/logs -g train/answers.jsonl -q train/questions.jsonl --save configs/calibrator.json
+```
+Thêm `--resume` cho `runner.py` để chạy tiếp sau khi bị ngắt (giữ các dòng đã ghi).
 
 ### 3.8 Các tham số config quan trọng (`configs/dev.yaml`)
 | Khoá | Ý nghĩa |

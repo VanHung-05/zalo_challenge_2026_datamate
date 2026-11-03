@@ -92,7 +92,7 @@ def test_run_pipeline_end_to_end(tmp_path):
     ]
     (split / "questions.jsonl").write_text("\n".join(json.dumps(q, ensure_ascii=False) for q in questions), encoding="utf-8")
     cfg = tmp_path / "cfg.yaml"
-    cfg.write_text("agent:\n  mode: sql\n  max_retries: 1\n", encoding="utf-8")
+    cfg.write_text("agent:\n  mode: sql\n  pipeline: v1\n  max_retries: 1\n", encoding="utf-8")
 
     llm = FakeLLM(["TYPE: number\n```sql\nSELECT SUM(tong_tien) FROM ban_hang\n```"])
     out = tmp_path / "out" / "submission.jsonl"

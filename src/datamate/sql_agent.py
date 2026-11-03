@@ -18,7 +18,7 @@ from src.datamate.llm import LLMWrapper
 from src.datamate.time_resolver import resolve_time
 
 
-VALID_TYPES = ["number", "percent", "string", "date", "boolean", "list", "table", "unanswerable"]
+VALID_TYPES = ["number", "percent", "string", "date", "boolean", "list", "table", "unanswerable", "explore"]
 SCALAR_TYPES = {"number", "percent", "string", "date", "boolean"}
 WEEKDAYS_VI = ["Thứ Hai", "Thứ Ba", "Thứ Tư", "Thứ Năm", "Thứ Sáu", "Thứ Bảy", "Chủ nhật"]
 MAX_README_CHARS = 6000
@@ -46,42 +46,24 @@ Câu hỏi: "{question}"
 {hints}
 ## CÁCH TRẢ LỜI
 Chỉ trả lời đúng định dạng sau, không giải thích:
-TYPE: <một trong: number, percent, string, date, boolean, list, table, unanswerable>
+TYPE: <một trong: number, percent, string, date, boolean, list, table, unanswerable, explore>
 ```sql
 SELECT ...
 ```
 
-Quy tắc SQL quan trọng theo nghiệp vụ (BẮT BUỘC TUÂN THỦ):
-1. Đúng một câu SELECT (được dùng WITH), cú pháp DuckDB, chỉ dùng đúng tên bảng/cột có trong SCHEMA.
-2. DOANH THU, SỐ ĐƠN, SỐ LƯỢNG BÁN, XẾP HẠNG: BẮT BUỘC loại bỏ đơn huỷ và trả hàng:
-   - Nếu có cột trạng thái/ghi chú đơn: KHÔNG lấy đơn có trạng thái chứa 'hủy', 'huy', 'trả', 'tra', 'cancel', 'return'.
-     Ví dụ: `(trang_thai IS NULL OR (LOWER(trang_thai) NOT LIKE '%h_y%' AND LOWER(trang_thai) NOT LIKE '%tr_%'))`
-   - Đơn đang giao / đang vận chuyển VẪN TÍNH vào doanh thu!
-3. ĐƠN CÓ DOANH THU/GIÁ TRỊ TỪ X TRỞ LÊN:
-   - Bảng bán hàng chi tiết là từng dòng mặt hàng. Muốn tính số đơn có tổng giá trị >= X:
-     `WITH don AS (SELECT ma_don_hang, SUM(thanh_tien) AS val FROM ban_hang WHERE <lọc ngày, trạng thái> GROUP BY ma_don_hang HAVING SUM(thanh_tien) >= X) SELECT COUNT(*) FROM don`
-4. GIÁ NHẬP BÌNH QUÂN một mặt hàng trong kỳ:
-   - Bình quân GIA QUYỀN THEO SỐ LƯỢNG NHẬP: `SUM(so_luong * don_gia) * 1.0 / SUM(so_luong)`.
-   - TUYỆT ĐỐI KHÔNG dùng AVG(don_gia) và KHÔNG lấy tổng tiền cả phiếu nhập chia số lượng một mặt hàng!
-5. TỈ LỆ HUỶ ĐƠN TRONG KỲ:
-   - Tỉ lệ = `ROUND(COUNT(DISTINCT CASE WHEN LOWER(trang_thai) LIKE '%h_y%' THEN ma_hoa_don END) * 100.0 / COUNT(DISTINCT ma_hoa_don), 2)`
-   - Mẫu số phải là MỌI ĐƠN trong kỳ (cả hoàn thành, huỷ, trả, đang giao).
-6. JOIN BẢNG CHI TIẾT & HOÁ ĐƠN / SẢN PHẨM:
-   - Nếu bảng chi tiết bán/nhập hàng không có cột ngày/thời gian thì PHẢI JOIN với bảng hoá đơn/phiếu nhập (qua `ma_hoa_don` hoặc `ma_nhap_hang`) để lọc ngày.
-   - Nếu cần thuộc tính hàng (hoạt chất, thuốc kê đơn...) thì JOIN với bảng danh mục/thuốc (qua `ma_hang`).
-   - Tham khảo các gợi ý JOIN ở cuối phần SCHEMA!
-7. TÌM KIẾM CHUỖI TIẾNG VIỆT: Dùng `LOWER(cot) LIKE '%từ_khóa%'` hoặc `ILIKE '%...%'`, tránh so sánh bằng tuyệt đối `=`.
-8. LỌC THỜI GIAN:
-   - Dùng `CAST(cot_thoi_gian AS DATE) BETWEEN DATE 'start_date' AND DATE 'end_date'`.
-   - "Tháng này" (as_of_date: YYYY-MM-DD): tính từ ngày đầu tháng đến hết hôm nay: `BETWEEN DATE 'YYYY-MM-01' AND DATE '{as_of_date}'`.
-   - "Hôm nay": đúng ngày `{as_of_date}`.
-   - "Hôm qua": đúng ngày `{as_of_date} - 1 ngày`.
-9. HÌNH DẠNG KẾT QUẢ THEO TYPE:
-   - number, percent, string, date, boolean: đúng 1 dòng, 1 cột.
-   - Tiền VND: `ROUND(x)` (số nguyên). percent: `ROUND(x, 2)` (số phần trăm, ví dụ 12.34). Số trung bình khác: `ROUND(x, 2)`.
-   - date: chuỗi `strftime(x, '%Y-%m-%d')` hoặc `strftime(x, '%Y-%m')`. boolean: TRUE/FALSE.
-   - string hoặc list: tên như trong dữ liệu, không kèm số đo.
-10. Nếu dữ liệu không có thông tin cần để trả lời thì trả lời `TYPE: unanswerable` và không viết SQL.
+Quy tắc (BẮT BUỘC):
+1. Đúng một câu SELECT (được dùng WITH), cú pháp DuckDB, chỉ dùng đúng tên bảng/cột/view có trong SCHEMA.
+2. Nghiệp vụ theo RULEBOOK ở trên. Nếu SCHEMA có view sl_orders / sl_lines thì ƯU TIÊN dùng chúng: các view này đã áp
+   luật đơn huỷ, đơn trả hàng (kể cả trả một phần), ô trống kế thừa dòng đầu đơn, dòng trùng của cùng đơn.
+3. Khoảng thời gian: dùng ĐÚNG các ngày trong [GỢI Ý] nếu có (đã tính sẵn theo rulebook), không tự tính lại.
+4. Tên trong dữ liệu có thể viết khác nhau (hoa thường, dấu, khoảng trắng): lọc bằng `ILIKE '%...%'` hoặc theo mã.
+5. HÌNH DẠNG KẾT QUẢ: number, percent, string, date, boolean: đúng 1 dòng, 1 cột. list: 1 cột theo đúng thứ tự cần trả.
+   table: cột đầu là tên đối tượng, các cột sau là số đo theo thứ tự câu hỏi. Không tự làm tròn: hệ thống làm tròn.
+   percent là số phần trăm (12.34, không phải 0.1234). date: strftime(x, '%Y-%m-%d') hoặc strftime(x, '%Y-%m').
+   string / list tên: lấy nguyên giá trị trong dữ liệu.
+6. Muốn xem dữ liệu trước (giá trị khác nhau của một cột, kiểm tra tên) thì trả lời `TYPE: explore` kèm một SELECT
+   (LIMIT ≤ 30); hệ thống gửi lại kết quả để bạn viết câu trả lời thật.
+7. Nếu dữ liệu không có thông tin cần để trả lời thì trả lời `TYPE: unanswerable` và không viết SQL.
 """
 
 REPAIR_SECTION = """
@@ -360,3 +342,137 @@ def answer_question_sql(
 
     trace["outcome"] = "abstain_after_retries"
     return {"id": question_id, "type": "abstain"}
+
+
+# ── Program synthesis with self-consistency (plan §4.5) ───────────────────────
+
+EXPLORE_SECTION = """
+## KẾT QUẢ KHÁM PHÁ (lần trước bạn chọn TYPE: explore)
+```sql
+{sql}
+```
+Kết quả: {result}
+Giờ hãy viết câu trả lời thật (TYPE khác explore).
+"""
+
+
+def build_hints(a: Any, entity_hits: Optional[List[Any]] = None) -> str:
+    """Pre-computed facts for the prompt. Times are only given when the resolver is confident:
+    a wrong hint does more harm than none (progress report 28/10)."""
+    lines: List[str] = []
+    t = a.time
+    if t.confident:
+        if t.primary:
+            lines.append(f"- Kỳ hỏi: từ {t.primary.start} đến {t.primary.end} (gồm cả 2 ngày){f' — {t.primary.label}' if t.primary.label else ''}")
+        if t.compare:
+            lines.append(f"- Kỳ so sánh: từ {t.compare.start} đến {t.compare.end}; phần trăm thay đổi = (kỳ hỏi − kỳ so) / kỳ so × 100")
+        for i, p in enumerate(t.periods, 1):
+            lines.append(f"- Kỳ {i}: từ {p.start} đến {p.end}")
+        if t.point_in_time:
+            lines.append(f"- Tình trạng tính đến hết ngày {t.point_in_time} (mọi phát sinh từ đầu dữ liệu đến hết ngày đó)")
+        if t.shift:
+            lines.append(f"- Chỉ lấy đơn ca {'sáng' if t.shift == 'morning' else 'chiều'} (theo giờ tạo đơn)")
+    lines.append(f"- Kiểu đáp án dự kiến: {a.answer_type}" + (f" ({'yyyy-mm' if a.date_granularity == 'month' else 'yyyy-mm-dd'})" if a.answer_type == "date" else ""))
+    if a.top_k:
+        lines.append(f"- Số phần tử cần trả: {a.top_k} (ít hơn thì trả hết); bằng nhau thì theo mã tăng dần")
+    for th in a.thresholds:
+        lines.append(f"- Ngưỡng: {th['op']} {th['value']} ({th.get('text', '')})")
+    for e in entity_hits or []:
+        lines.append(f"- '{e.phrase}' trong câu hỏi là {e.kind} '{e.value}' (lọc theo cột {e.column} của sl_lines)")
+    return "[GỢI Ý]\n" + "\n".join(lines) if lines else ""
+
+
+def run_sql_sample(
+    question: str, as_of_date: str, db: BusinessDB, readme: str, rulebook_text: str, schema_text: str, hints: str,
+    llm: Any, max_rounds: int, timeout: float, temperature: float, seed: Optional[int], default_type: str,
+    max_explore: int = 2,
+) -> Dict[str, Any]:
+    """One independent solution: generate -> (explore) -> execute -> repair. Returns a record with
+    'outcome' in answered | unanswerable | failed, plus 'raw', 'answer_type', 'sql', 'rounds'."""
+    rounds: List[Dict[str, Any]] = []
+    prev_type = prev_sql = feedback = None
+    explore_note = ""
+    n_explore = 0
+    for r in range(max_rounds + max_explore):
+        prompt = build_sql_prompt(question, as_of_date, rulebook_text, readme, schema_text, hints,
+                                  previous_type=prev_type, previous_sql=prev_sql, feedback=feedback) + explore_note
+        rec: Dict[str, Any] = {"round": r, "prompt_chars": len(prompt)}
+        rounds.append(rec)
+        t0 = time.time()
+        out = llm.generate(prompt, temperature=temperature, seed=seed) if temperature or seed is not None else llm.generate(prompt)
+        rec["llm_seconds"] = round(time.time() - t0, 2)
+        response = out[0] if out else ""
+        rec["llm_response"] = response[:MAX_LOGGED_RESPONSE_CHARS]
+        answer_type, sql = parse_llm_response(response)
+        rec["parsed_type"], rec["sql"] = answer_type, sql
+        if answer_type == "unanswerable":
+            return {"outcome": "unanswerable", "rounds": rounds}
+        if answer_type == "explore" and sql and n_explore < max_explore:
+            n_explore += 1
+            df, err = db.execute(sql, timeout=timeout, max_rows=30)
+            explore_note = EXPLORE_SECTION.format(sql=sql, result=err or _preview(df, 30))
+            rec["explore"] = err or _preview(df, 5)
+            continue
+        if answer_type in (None, "explore"):
+            answer_type = default_type
+            rec["type_source"] = "question_analysis"
+        if not sql:
+            feedback, prev_type, prev_sql = "Không tìm thấy câu SQL trong khối ```sql```.", answer_type, None
+            rec["error"] = feedback
+            continue
+        t0 = time.time()
+        df, err = db.execute(sql, timeout=timeout)
+        rec["sql_seconds"] = round(time.time() - t0, 3)
+        rec["result"] = _preview(df)
+        if err is None:
+            raw, err = sql_result_to_raw(df, answer_type)
+            if err is None:
+                return {"outcome": "answered", "raw": raw, "answer_type": answer_type, "sql": sql, "rounds": rounds}
+            err += f" Kết quả nhận được: {_preview(df, 3)}"
+        rec["error"] = err
+        if "quá" in str(err) and "giây" in str(err):
+            rec["timeout"] = True
+        feedback, prev_type, prev_sql = diagnose_duckdb_error(err, db, sql), answer_type, sql
+    return {"outcome": "failed", "rounds": rounds}
+
+
+def generate_sql_candidates(
+    question_id: str, a: Any, db: BusinessDB, readme: str, rulebook_text: str, extra_schema: str,
+    config: Dict[str, Any], llm: Any, entity_hits: Optional[List[Any]] = None, is_money: bool = False,
+    known_names: Optional[set] = None, trace: Optional[Dict[str, Any]] = None,
+) -> List[Any]:
+    """N independent samples (plan §4.5 self-consistency). Sample 0 is greedy; the others use
+    temperature agent.sample_temperature with seed base+i, so a rerun reproduces them."""
+    from src.datamate.decision import Candidate, sanity_checks
+
+    agent_cfg = config.get("agent", {})
+    n = max(1, int(agent_cfg.get("n_samples", 1)))
+    max_rounds = int(agent_cfg.get("max_retries", 2)) + 1
+    timeout = float(agent_cfg.get("sandbox_timeout", 30))
+    temp = float(agent_cfg.get("sample_temperature", 0.7))
+    base_seed = int(config.get("llm", {}).get("seed", 42))
+    hints = build_hints(a, entity_hits)
+    schema_text = (extra_schema + "\n\n" if extra_schema else "") + db.schema_text
+    trace = trace if trace is not None else {}
+    samples = trace.setdefault("llm_samples", [])
+    cands: List[Any] = []
+    for i in range(n):
+        rec = run_sql_sample(a.raw, a.as_of.isoformat(), db, readme, rulebook_text, schema_text, hints, llm, max_rounds,
+                             timeout, temperature=0.0 if i == 0 else temp, seed=None if i == 0 else base_seed + i,
+                             default_type=a.answer_type)
+        samples.append(rec)
+        flags = ["sandbox_timeout"] if any(r.get("timeout") for r in rec["rounds"]) else []
+        if rec["outcome"] == "unanswerable":
+            cands.append(Candidate({"type": "unanswerable"}, "llm", True, {}, flags, {"sample": i}))
+        elif rec["outcome"] == "answered":
+            item = format_submission_item(question_id, rec["raw"], rec["answer_type"], is_money=is_money,
+                                          date_granularity=a.date_granularity)
+            if item.get("type") == "abstain":
+                cands.append(Candidate(item, "llm", False, {}, flags + ["format_failed"], {"sample": i, "sql": rec["sql"]}))
+                continue
+            checks = sanity_checks(item, a.answer_type, a.top_k, known_names,
+                                   is_count=a.answer_type == "number" and not is_money and "quantity" not in a.concepts)
+            cands.append(Candidate(item, "llm", True, checks, flags, {"sample": i, "sql": rec["sql"]}))
+        else:
+            cands.append(Candidate({"type": "abstain"}, "llm", False, {}, flags, {"sample": i}))
+    return cands

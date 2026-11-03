@@ -68,7 +68,7 @@ def main():
         question=target_q["question"],
         as_of_date=target_q["as_of_date"],
         business_data=bdata,
-        rules_summary=rb.get_core_rules_prompt(),
+        rules_summary=rb.raw_text,
         time_range=time_range
     )
     print("\n--- GENERATED PROMPT (snippet) ---")

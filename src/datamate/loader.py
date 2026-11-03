@@ -133,18 +133,30 @@ def parse_vietnamese_number(val: Any) -> Any:
     if not s:
         return np.nan
 
-    # Check for unit suffix like "k", "K"
-    multiplier = 1.0
-    if re.search(r"\d+\s*[kK]$", s):
-        multiplier = 1000.0
-        s = re.sub(r"[kK]$", "", s).strip()
+    # Remove currency suffixes first ("250kđ", "1,25tr đ")
+    s = re.sub(r"\s*(đồng|đ|vnđ|vnd|\$)\s*$", "", s, flags=re.IGNORECASE).strip()
 
-    # Remove currency / quantity suffixes: đ, vnđ, vnd, ly, chai, lon, kg, m, cái, bộ
-    s = re.sub(r"(đ|vnđ|vnd|\$)\s*$", "", s, flags=re.IGNORECASE).strip()
+    # Magnitude suffix: "250k" = 250 000, "1,25tr" / "1.25 triệu" = 1 250 000. With a magnitude
+    # suffix the separator is a decimal mark ("1,002tr" = 1 002 000)
+    # Shorthand "1tr090" = 1 090 000, "1tr5" = 1 500 000, "2k5" = 2 500 (digits after the unit are its fraction)
+    m_short = re.match(r"^(-?\d+)\s*(tr|k)\s*(\d{1,3})$", s, flags=re.IGNORECASE)
+    if m_short:
+        unit = 1_000_000 if m_short.group(2).lower() == "tr" else 1_000
+        frac = int(m_short.group(3).ljust(3, "0")) * unit // 1000
+        whole = int(m_short.group(1))
+        return whole * unit + (frac if whole >= 0 else -frac)
+
+    multiplier = 1.0
+    m_mag = re.match(r"^(-?\d+(?:[.,]\d+)?)\s*(k|nghìn|ngàn|tr|triệu|trieu)$", s, flags=re.IGNORECASE)
+    if m_mag:
+        multiplier = 1000.0 if m_mag.group(2).lower() in ("k", "nghìn", "ngàn") else 1_000_000.0
+        s = m_mag.group(1).replace(",", ".")
     s = re.sub(r"^\s*-\s*", "-", s)  # negative sign
 
     # Clean dots and commas
-    if re.match(r"^-?\d{1,3}(\.\d{3})+(,\d+)?$", s):
+    if m_mag:
+        pass
+    elif re.match(r"^-?\d{1,3}(\.\d{3})+(,\d+)?$", s):
         # dot thousand, comma decimal e.g. 4.820.000 or 4.820.000,50
         s = s.replace(".", "").replace(",", ".")
     elif re.match(r"^-?\d{1,3}(,\d{3})+(\.\d+)?$", s):
@@ -155,12 +167,35 @@ def parse_vietnamese_number(val: Any) -> Any:
         s = s.replace(",", ".")
 
     try:
-        num = float(s) * multiplier
+        num = round(float(s) * multiplier, 6)  # 1.002 * 1e6 -> 1002000.0, not 1001999.9999
         if num.is_integer():
             return int(num)
         return num
     except ValueError:
         return val
+
+
+# A text cell that is a number written the Vietnamese way: "1.250.000", "1,250,000", "12,5", "250k", "1,25tr", "45.000đ"
+NUMBER_TEXT_RE = re.compile(
+    r"^-?\s*((\d{1,3}([.,]\d{3})+([.,]\d+)?|\d+([.,]\d+)?)\s*(k|nghìn|ngàn|tr|triệu|trieu)?|\d+\s*(tr|k)\s*\d{1,3})\s*(đồng|đ|vnđ|vnd)?$",
+    re.IGNORECASE,
+)
+
+
+def looks_numeric_column(s: pd.Series, min_share: float = 0.98) -> bool:
+    """Decide from the values (not the column name) whether a text column holds numbers.
+    Codes and phone numbers with leading zeros ('0912...', '0012') are not numbers."""
+    vals = s.dropna()
+    if vals.empty:
+        return False
+    texts = [v for v in vals.tolist() if isinstance(v, str)]
+    if not texts:
+        return False
+    uniq = list(dict.fromkeys(t.strip() for t in texts))[:5000]
+    if any(re.match(r"^0\d", u) for u in uniq):
+        return False
+    hits = sum(1 for u in uniq if NUMBER_TEXT_RE.match(u))
+    return hits >= max(1, min_share * len(uniq))
 
 
 def is_date_column_name(col_name: str) -> bool:
@@ -180,6 +215,64 @@ def is_numeric_column_name(col_name: str) -> bool:
         "thu", "trả", "tra", "tổng", "tong", "thành tiền", "thanh_tien", "chiết khấu"
     ]
     return any(k in norm for k in num_keywords)
+
+
+def _map_unique(s: pd.Series, fn) -> pd.Series:
+    """s.apply(fn), evaluated once per distinct value (keyed by type too: 1 and '1' differ)."""
+    cache: Dict[Tuple[type, Any], Any] = {}
+    out = []
+    for v in s.tolist():
+        try:
+            key = (type(v), v)
+            if key not in cache:
+                cache[key] = fn(v)
+            out.append(cache[key])
+        except TypeError:  # unhashable cell
+            out.append(fn(v))
+    return pd.Series(out, index=s.index)
+
+
+SUMMARY_LABEL_RE = r"(tổng|tong|total|cộng|cong|sum)(\s*(cộng|cong|số|so|tiền|tien|kết|ket|chung|cả|ca|all))*\s*[:.]?"
+
+
+def fill_down_grouped_rows(df: pd.DataFrame, min_share: float = 0.05) -> Tuple[pd.DataFrame, List[str]]:
+    """Rulebook §8: 'Ô để trống ở các dòng sau của cùng một nhóm dòng: giống ô đó ở dòng đầu nhóm'.
+    Detected from the layout, not from column names: a set of >= 2 columns that are empty together
+    on exactly the same rows (>= min_share of the rows, never the first row) is a group header
+    (order id, date, state, customer...). Those cells are copied down from the row that opens the
+    group. Columns that are also empty elsewhere (e.g. walk-in customers on the first row) are only
+    filled on the group-continuation rows. Returns (df, filled columns)."""
+    if len(df) < 3:
+        return df, []
+    na = df.isna()
+    counts = na.sum()
+    cand = [c for c in df.columns if 0 < counts[c] < len(df)]
+    if len(cand) < 2:
+        return df, []
+    # Continuation rows = the most common exact null-pattern among rows with nulls in `cand`
+    patterns = na[cand].apply(lambda r: tuple(r.values), axis=1)
+    patterns = patterns[patterns.map(any)]
+    if patterns.empty:
+        return df, []
+    top, n_top = patterns.value_counts().index[0], int(patterns.value_counts().iloc[0])
+    group_cols = [c for c, is_na in zip(cand, top) if is_na]
+    if len(group_cols) < 2 or n_top < min_share * len(df):
+        return df, []
+    cont = na[group_cols].all(axis=1)
+    if cont.iloc[0]:
+        return df, []
+    # Columns whose own null mask equals the continuation mask, or contains it
+    filled = [c for c in group_cols if (na[c] & cont).sum() == cont.sum()]
+    if len(filled) < 2:
+        return df, []
+    df = df.copy()
+    group_id = (~cont).cumsum()
+    for c in filled:
+        # The opening row's own value, even when empty (ffill would copy the previous order's customer
+        # into a walk-in order)
+        opener = df[c].where(~cont).groupby(group_id).transform("first")
+        df.loc[cont, c] = opener[cont]
+    return df, filled
 
 
 def clean_dataframe(df: pd.DataFrame, default_year: Optional[int] = None, keep_time: bool = False) -> pd.DataFrame:
@@ -209,22 +302,34 @@ def clean_dataframe(df: pd.DataFrame, default_year: Optional[int] = None, keep_t
     if is_repeated_header.any():
         df = df[~is_repeated_header].reset_index(drop=True)
 
-    # Vectorized filter for summary/total rows ("TỔNG", "TOTAL", etc.)
-    summary_keywords = ("tổng", "tong", "total", "cộng", "cong")
+    # Summary/total rows ("TỔNG", "Tổng cộng:", "TOTAL"). The whole cell must be the label, or start
+    # with "tổng cộng"/"total" on a sparse row: a prefix test would drop real rows such as customer
+    # "Tống Hoàng Linh" written without accents ("Tong Hoang Linh") or a customer named "Công".
     check_cols = df.columns[:min(4, len(df.columns))]
     is_summary = pd.Series(False, index=df.index)
+    sparse = df.notna().sum(axis=1) <= max(1, int(len(df.columns) * 0.6))
     for c in check_cols:
         s_str = df[c].astype(str).str.strip().str.lower()
-        is_summary |= s_str.str.startswith(summary_keywords)
+        is_summary |= s_str.str.fullmatch(SUMMARY_LABEL_RE)
+        is_summary |= s_str.str.match(r"^(tổng cộng|tong cong|total)\b") & sparse
 
     if is_summary.any():
         df = df[~is_summary].reset_index(drop=True)
 
-    # Process date and numeric columns
+    # Group rows whose order cells are written only on the first line (rulebook §8)
+    df, _filled = fill_down_grouped_rows(df)
+
+    # Process date and numeric columns (parsed once per distinct value: dates repeat a lot)
     for col in df.columns:
         if is_date_column_name(col):
             try:
-                df[col] = df[col].apply(lambda x: parse_vietnamese_date(x, default_year, keep_time))
+                df[col] = _map_unique(df[col], lambda x: parse_vietnamese_date(x, default_year, keep_time))
+            except Exception:
+                pass
+        elif looks_numeric_column(df[col]):
+            # e.g. "Amount" = '1,000,000' or "Tiền bán" = '1,002tr': the values decide, whatever the name
+            try:
+                df[col] = _map_unique(df[col], parse_vietnamese_number)
             except Exception:
                 pass
         elif is_numeric_column_name(col):
@@ -235,27 +340,56 @@ def clean_dataframe(df: pd.DataFrame, default_year: Optional[int] = None, keep_t
                     converted_sample = sample.apply(parse_vietnamese_number)
                     num_ratio = sum(isinstance(v, (int, float, np.integer, np.floating)) and not pd.isna(v) for v in converted_sample) / len(sample)
                     if num_ratio >= 0.7:
-                        df[col] = df[col].apply(parse_vietnamese_number)
+                        df[col] = _map_unique(df[col], parse_vietnamese_number)
             except Exception:
                 pass
 
     return df
 
 
+def _calamine_cell(v: Any) -> Any:
+    # Same values as openpyxl(data_only=True): empty -> None, integral floats -> int
+    if v == "":
+        return None
+    if isinstance(v, float) and v.is_integer():
+        return int(v)
+    return v
+
+
+def read_workbook_raw(filepath: str) -> Dict[str, List[list]]:
+    """All sheets of a workbook as raw cell rows, read once.
+    python-calamine is ~10x faster than openpyxl on 300k-row files and returns identical values;
+    openpyxl (read_only) is the fallback."""
+    try:
+        from python_calamine import CalamineWorkbook
+        wb = CalamineWorkbook.from_path(filepath)
+        return {
+            name: [[_calamine_cell(v) for v in row] for row in wb.get_sheet_by_name(name).to_python(skip_empty_area=False)]
+            for name in wb.sheet_names
+        }
+    except ImportError:
+        pass
+    wb = openpyxl.load_workbook(filepath, data_only=True, read_only=True)
+    try:
+        return {name: [list(r) for r in wb[name].iter_rows(values_only=True)] for name in wb.sheetnames}
+    finally:
+        wb.close()
+
+
 def load_excel_sheet(
     filepath: str,
     sheet_name: Optional[str] = None,
     default_year: Optional[int] = None,
-    keep_time: bool = False
+    keep_time: bool = False,
+    raw_rows: Optional[List[list]] = None
 ) -> pd.DataFrame:
-    """Load an Excel sheet, detecting offset headers and trailing totals."""
+    """Load an Excel sheet, detecting offset headers and trailing totals.
+    raw_rows: the sheet's cells already read by read_workbook_raw (avoids re-opening the file)."""
     try:
-        # Load raw values using openpyxl
-        wb = openpyxl.load_workbook(filepath, data_only=True, read_only=True)
-        target_sheet = sheet_name if sheet_name else wb.sheetnames[0]
-        ws = wb[target_sheet]
-
-        all_rows = list(ws.iter_rows(values_only=True))
+        if raw_rows is None:
+            sheets = read_workbook_raw(filepath)
+            raw_rows = sheets[sheet_name] if sheet_name else next(iter(sheets.values()), [])
+        all_rows = raw_rows
         if not all_rows:
             return pd.DataFrame()
 
@@ -302,14 +436,14 @@ def load_csv_file(filepath: str, default_year: Optional[int] = None, keep_time: 
     for enc in encodings:
         for sep in [",", ";", "\t"]:
             try:
-                df = pd.read_csv(filepath, encoding=enc, sep=sep)
+                df = pd.read_csv(filepath, encoding=enc, sep=sep, low_memory=False)
                 if df.shape[1] > 1:
                     return clean_dataframe(df, default_year, keep_time)
             except Exception:
                 continue
     # Fallback default
     try:
-        df = pd.read_csv(filepath)
+        df = pd.read_csv(filepath, low_memory=False)
         return clean_dataframe(df, default_year, keep_time)
     except Exception:
         return pd.DataFrame()
@@ -341,6 +475,50 @@ def extract_year_month_from_filename(filename: str) -> Tuple[Optional[int], Opti
     if m_year:
         return int(m_year.group(1)), None
     return None, None
+
+
+# Suffixes that split one list into several files: _1, _2026, _T5_2025, _Thang05_2026, _TongHop_2025, _Sheet1
+SPLIT_SUFFIX_RE = re.compile(r"(?:[_\- ](?:\d{1,4}|T\d{1,2}_\d{4}|Thang\d{1,2}_\d{4}|TongHop_\d{4}|Sheet\d+))+$", re.IGNORECASE)
+
+
+# A period token anywhere in the name ends the file family: "BanHang_TongHop_2025_BanHang" (sheet of a
+# multi-sheet yearly file) and "BanHang_TongHop_2026" (single-sheet file) are both family "BanHang"
+PERIOD_TOKEN_RE = re.compile(r"[_\- ](?:TongHop_)?(?:T\d{1,2}_|Thang\d{1,2}_)?(?:19|20)\d{2}(?=$|[_\- ])", re.IGNORECASE)
+
+
+def table_stem(name: str) -> str:
+    head = PERIOD_TOKEN_RE.split(name, maxsplit=1)[0]
+    return SPLIT_SUFFIX_RE.sub("", head) or head or name
+
+
+def merge_split_tables(tables: Dict[str, pd.DataFrame]) -> Dict[str, List[str]]:
+    """Union tables with the same stem and the same set of columns (order may differ).
+    The union is stored under the stem name (or '<stem>_all' if the stem is itself a part) and
+    the parts are listed in the returned {union name: [parts]} so SQL mode can hide them."""
+    groups: Dict[Tuple[str, Tuple[str, ...]], List[str]] = {}
+    for name, df in tables.items():
+        groups.setdefault((table_stem(name), tuple(sorted(map(str, df.columns)))), []).append(name)
+    merged: Dict[str, List[str]] = {}
+    for (stem, _cols), parts in groups.items():
+        if len(parts) < 2:
+            continue
+        parts = sorted(parts, key=_natural_key)
+        cols = list(tables[parts[0]].columns)
+        union = pd.concat([tables[p][cols] for p in parts], ignore_index=True)
+        target = stem if stem not in parts else f"{stem}_all"
+        while target in tables and target not in parts:
+            target += "_all"
+        tables[target] = union
+        merged[target] = parts
+    return merged
+
+
+def _natural_key(name: str) -> List[Any]:
+    """'X_2' < 'X_10'; 'BanHang_T2_2025' < 'BanHang_T10_2025' < 'BanHang_T1_2026' (year before month)."""
+    m = re.search(r"T(?:hang)?(\d{1,2})_(\d{4})$", name, re.IGNORECASE)
+    if m:
+        return [name[: m.start()], int(m.group(2)), int(m.group(1))]
+    return [int(t) if t.isdigit() else t.lower() for t in re.split(r"(\d+)", name)]
 
 
 _BUSINESS_CACHE: Dict[Tuple[str, bool], BusinessData] = {}
@@ -379,9 +557,6 @@ def load_business_data(
     xlsx_files = [f for f in all_files if f.endswith(".xlsx")]
     sqlite_files = [f for f in all_files if f.endswith(".sqlite") or f.endswith(".db")]
 
-    # Group monthly files
-    monthly_sales_frames = []
-    monthly_sales_keys: List[str] = []
     other_tables: Dict[str, pd.DataFrame] = {}
 
     # Check for SQLite first
@@ -396,20 +571,17 @@ def load_business_data(
         year, month = extract_year_month_from_filename(xf)
         base_name = os.path.splitext(xf)[0]
 
-        # Is this a monthly sales slice? e.g. BanHang_T1_2025.xlsx or BanHang_TongHop_2025.xlsx
-        is_monthly_sales = bool(re.search(r"^(?:BanHang|DonHang|So_chi_tiet_ban_hang)", base_name, re.IGNORECASE) and year)
-
         try:
-            wb = openpyxl.load_workbook(x_path, read_only=True)
-            sheet_names = wb.sheetnames
+            raw_sheets: Dict[Optional[str], Optional[List[list]]] = dict(read_workbook_raw(x_path))
         except Exception:
-            sheet_names = [None]
+            raw_sheets = {None: None}
 
         sheet_frames: List[Tuple[Optional[str], pd.DataFrame]] = []
-        for s_name in sheet_names:
+        for s_name, raw_rows in raw_sheets.items():
             # Rulebook §8: a date without year takes the year of the sheet holding the row
             sheet_year = extract_year_month_from_filename(s_name)[0] if s_name else None
-            df = load_excel_sheet(x_path, sheet_name=s_name, default_year=sheet_year or year, keep_time=keep_time)
+            df = load_excel_sheet(x_path, sheet_name=s_name, default_year=sheet_year or year, keep_time=keep_time,
+                                  raw_rows=raw_rows)
             if df.empty:
                 continue
             sheet_frames.append((s_name, df))
@@ -430,10 +602,6 @@ def load_business_data(
             table_key = f"{base_name}_{s_name}" if s_name and len(sheet_frames) > 1 else base_name
             other_tables[table_key] = df
 
-            if is_monthly_sales:
-                monthly_sales_frames.append(df)
-                monthly_sales_keys.append(table_key)
-
     # Process CSV files
     for cf in csv_files:
         c_path = os.path.join(abs_dir, cf)
@@ -447,21 +615,14 @@ def load_business_data(
             bdata.unit_conversion = df
 
         other_tables[base_name] = df
-        if re.search(r"^(?:ban_hang|don_hang|so_ban_hang)", base_name, re.IGNORECASE):
-            monthly_sales_frames.append(df)
-            monthly_sales_keys.append(base_name)
 
-    # Unify monthly sales if present into a master table "BanHang"
-    if monthly_sales_frames:
-        try:
-            unified_sales = pd.concat(monthly_sales_frames, ignore_index=True)
-            # Remove exact duplicate rows if any
-            unified_sales = unified_sales.drop_duplicates().reset_index(drop=True)
-            other_tables["BanHang"] = unified_sales
-            # Slices already contained in BanHang (SQL mode hides them from the prompt)
-            bdata.metadata["merged_into"] = {"BanHang": [k for k in monthly_sales_keys if k != "BanHang"]}
-        except Exception:
-            pass
+    # A list split into several files ("_1", "_2", "_T5_2025", "_2026", "_TongHop_2025") -> one table.
+    # Rows are concatenated as they are: duplicates are NOT dropped here, because rulebook §8 only
+    # merges identical lines of the same order (handled by the semantic layer), never two records of
+    # a table not kept by order.
+    merged_into = merge_split_tables(other_tables)
+    if merged_into:
+        bdata.metadata["merged_into"] = merged_into
 
     bdata.tables = other_tables
 

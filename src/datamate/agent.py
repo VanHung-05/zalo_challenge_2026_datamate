@@ -57,7 +57,7 @@ def answer_question(
 
     # Load rulebook
     rulebook = get_rulebook(business_data.data_dir)
-    rules_summary = rulebook.get_core_rules_prompt()
+    rules_summary = rulebook.raw_text
 
     expected_type = infer_expected_type(question)
     time_range = resolve_time(question, as_of_date, calendar_df=business_data.calendar)

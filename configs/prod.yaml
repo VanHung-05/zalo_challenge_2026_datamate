@@ -9,16 +9,32 @@ llm:
 
 agent:
   mode: sql
+  pipeline: v2            # v2: Business Card + semantic layer + fast path + Guard + calibrated decision | v1: single-shot SQL
   n_samples: 3
   max_retries: 3
   sandbox_timeout: 30
   sql_threads: 1
   on_llm_unanswerable: unanswerable
-  confidence_threshold: 0.5
+  sample_temperature: 0.7  # self-consistency samples 2..n (sample 1 is greedy); seed = llm.seed + i
+  llm_verify_fast_path: false  # also run the LLM when the fast path answered
 
 runner:
+  time_budget_seconds: 18000   # global watchdog: questions after this are abstain (limit is 6 h)
+  question_timeout_seconds: 150  # per question: no new LLM sample after this
+  cache_dir: /tmp/datamate_cache  # Business Cards (never written under /data)
   parallel_workers: 4
   group_by_business: true
   logs_dir: "/result/logs"
   data_dir: "/data"
   output_file: "/result/submission.jsonl"
+
+decision:                  # plan §1.2 / §4.7
+  tau: 0.7                 # answer a value only if P(correct) >= tau
+  tau_unanswerable: 0.8    # answer "unanswerable" only if P(unanswerable) >= this
+  p_unanswerable_out_of_coverage: 0.85  # period outside a coverage that agrees with the README (rulebook §7)
+  p_unanswerable_capability: 0.5        # semantic layer found no column for it (often our detection failure)
+  p_unanswerable_llm_unanimous: 0.6  # every LLM sample said unanswerable (weak on its own)
+  min_sales_confidence: 0.4          # below: fast-path answers are vetoed (low_confidence_role)
+  fast_path_priors: configs/fast_path_priors.json   # per-intent precision (scripts/eval_fast_path.py --priors-out)
+  guard_weights: null      # scripts/train_guard.py --save PATH
+  calibrator: null         # scripts/train_calibrator.py --save PATH

@@ -41,21 +41,36 @@ class LLMWrapper:
         else:
             raise ValueError(f"Unknown LLM backend: {self.backend}")
 
+    def _chat(self, prompt: str) -> str:
+        """Instruct models expect their chat template; a raw prompt degrades them (vLLM .generate()
+        does not apply it, Ollama /api/generate does)."""
+        try:
+            tok = self.engine.get_tokenizer()
+            if getattr(tok, "chat_template", None):
+                return tok.apply_chat_template([{"role": "user", "content": prompt}], tokenize=False, add_generation_prompt=True)
+        except Exception as e:
+            print(f"[LLM Warning] chat template not applied: {e}")
+        return prompt
+
     def generate(
         self,
         prompt: str,
         temperature: Optional[float] = None,
         max_tokens: Optional[int] = None,
         n: int = 1,
-        stop: Optional[List[str]] = None
+        stop: Optional[List[str]] = None,
+        seed: Optional[int] = None
     ) -> List[str]:
+        """seed: per-request seed (self-consistency samples use base seed + i, so a rerun draws the
+        same samples; Rule 8 reproducibility)."""
         temp = temperature if temperature is not None else self.default_temp
         max_tok = max_tokens if max_tokens is not None else self.default_max_tokens
         stop_tokens = stop if stop is not None else ["```\n\n", "User:", "<|im_end|>"]
+        req_seed = self.seed if seed is None else seed
 
         if self.backend == "ollama":
             responses = []
-            for _ in range(n):
+            for i in range(n):
                 payload = {
                     "model": self.model,
                     "prompt": prompt,
@@ -63,7 +78,7 @@ class LLMWrapper:
                         "temperature": temp,
                         "num_predict": max_tok,
                         "num_ctx": self.num_ctx,
-                        "seed": self.seed,
+                        "seed": req_seed + i,
                         "stop": stop_tokens
                     },
                     "stream": False
@@ -87,9 +102,9 @@ class LLMWrapper:
                 max_tokens=max_tok,
                 n=n,
                 stop=stop_tokens,
-                seed=self.seed
+                seed=req_seed
             )
-            outputs = self.engine.generate([prompt], params)
+            outputs = self.engine.generate([self._chat(prompt)], params)
             return [o.text for o in outputs[0].outputs]
 
         return []
