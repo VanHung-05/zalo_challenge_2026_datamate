@@ -113,7 +113,14 @@ def run_pipeline(
     if runner_cfg.get("group_by_business", True):
         questions.sort(key=lambda q: q.get("business_id", ""))
 
-    print(f"Loaded {len(questions)} questions from {questions_path} (mode={mode}, pipeline={'v2' if use_v2 else 'v1'})")
+    if use_v2:
+        # agent.mode only selects the v2 pipeline; what the LLM writes is agent.synthesis
+        run_desc = (f"pipeline=v2, LLM writes {agent_cfg.get('synthesis', 'sql')}, "
+                    f"fast_path={'on' if agent_cfg.get('fast_path', True) else 'off'}, "
+                    f"n_samples={agent_cfg.get('n_samples', 1)}, calibrator={config.get('decision', {}).get('calibrator') or 'none'}")
+    else:
+        run_desc = f"mode={mode}, pipeline=v1"
+    print(f"Loaded {len(questions)} questions from {questions_path} ({run_desc})")
     print(f"Output will be saved to: {output_path}")
 
     out_dir = os.path.dirname(os.path.abspath(output_path))
