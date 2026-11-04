@@ -131,38 +131,42 @@ def answer(
     flags: List[str] = []
     money = is_money_question(a)
 
-    # Fast path (deterministic)
+    # Fast path (deterministic). agent.fast_path: false -> answers come from the LLM only; the semantic
+    # tables sl_* stay available to the LLM, and the Guard still covers out-of-coverage periods.
     fa = None
-    try:
-        fa, fp_trace = try_fast_path(a, ctx.card, ctx.sem)
-        log["fast_path"] = fp_trace
-        if fp_trace.get("ambiguous_entities"):
-            flags.append("entity_ambiguous")
-    except (CapabilityMissing, OutOfCoverage) as e:
-        log["fast_path"] = {"raised": type(e).__name__, "detail": str(e)}
-        # A period outside a coverage that agrees with the README is rulebook §7 evidence. A missing role
-        # is often our own detection failure on an unfamiliar file format (public test), so it is weak.
-        if isinstance(e, OutOfCoverage) and coverage_reliable(ctx.card):
-            p_sem = float(dcfg.get("p_unanswerable_out_of_coverage", 0.85))
-        else:
-            p_sem = float(dcfg.get("p_unanswerable_capability", 0.5))
-            flags.append("capability_unclear")
-        if p_sem > p_unans:
-            p_unans, unans_reason = p_sem, str(e)
-    except SemanticUncertain as e:
-        log["fast_path"] = {"raised": "SemanticUncertain", "detail": str(e)}
-        flags.append("semantic_uncertain")
-    except Exception:
-        log["fast_path"] = {"raised": "error", "detail": traceback.format_exc()[-1500:]}
-    if fa is not None:
-        item = format_submission_item(qid, fa.value, fa.answer_type, is_money=fa.money, date_granularity=a.date_granularity)
-        if item.get("type") != "abstain":
-            checks = sanity_checks(item, a.answer_type, a.top_k, ctx.known_names if fa.answer_type in ("string", "list") else None)
-            meta = {"intent": fa.intent, "evidence": fa.evidence}
-            if priors and fa.intent in priors:
-                meta["prior"] = priors[fa.intent]
-            cands.append(Candidate(item, "fast_path", True, checks, [], meta))
-            log["fast_path"]["item"] = item
+    if not acfg.get("fast_path", True):
+        log["fast_path"] = {"disabled": True}
+    else:
+        try:
+            fa, fp_trace = try_fast_path(a, ctx.card, ctx.sem)
+            log["fast_path"] = fp_trace
+            if fp_trace.get("ambiguous_entities"):
+                flags.append("entity_ambiguous")
+        except (CapabilityMissing, OutOfCoverage) as e:
+            log["fast_path"] = {"raised": type(e).__name__, "detail": str(e)}
+            # A period outside a coverage that agrees with the README is rulebook §7 evidence. A missing role
+            # is often our own detection failure on an unfamiliar file format (public test), so it is weak.
+            if isinstance(e, OutOfCoverage) and coverage_reliable(ctx.card):
+                p_sem = float(dcfg.get("p_unanswerable_out_of_coverage", 0.85))
+            else:
+                p_sem = float(dcfg.get("p_unanswerable_capability", 0.5))
+                flags.append("capability_unclear")
+            if p_sem > p_unans:
+                p_unans, unans_reason = p_sem, str(e)
+        except SemanticUncertain as e:
+            log["fast_path"] = {"raised": "SemanticUncertain", "detail": str(e)}
+            flags.append("semantic_uncertain")
+        except Exception:
+            log["fast_path"] = {"raised": "error", "detail": traceback.format_exc()[-1500:]}
+        if fa is not None:
+            item = format_submission_item(qid, fa.value, fa.answer_type, is_money=fa.money, date_granularity=a.date_granularity)
+            if item.get("type") != "abstain":
+                checks = sanity_checks(item, a.answer_type, a.top_k, ctx.known_names if fa.answer_type in ("string", "list") else None)
+                meta = {"intent": fa.intent, "evidence": fa.evidence}
+                if priors and fa.intent in priors:
+                    meta["prior"] = priors[fa.intent]
+                cands.append(Candidate(item, "fast_path", True, checks, [], meta))
+                log["fast_path"]["item"] = item
 
     # LLM program synthesis (skipped when the Guard is sure, or the fast path is enough, or time is up)
     run_llm = llm is not None and g.verdict != "unanswerable"

@@ -392,8 +392,11 @@ def run_sql_sample(
     rounds: List[Dict[str, Any]] = []
     prev_type = prev_sql = feedback = None
     explore_note = ""
-    n_explore = 0
+    n_explore = n_answer_rounds = 0
     for r in range(max_rounds + max_explore):
+        # explore rounds have their own budget: a failing answer may only use max_rounds attempts
+        if n_answer_rounds >= max_rounds:
+            break
         prompt = build_sql_prompt(question, as_of_date, rulebook_text, readme, schema_text, hints,
                                   previous_type=prev_type, previous_sql=prev_sql, feedback=feedback) + explore_note
         rec: Dict[str, Any] = {"round": r, "prompt_chars": len(prompt)}
@@ -413,6 +416,7 @@ def run_sql_sample(
             explore_note = EXPLORE_SECTION.format(sql=sql, result=err or _preview(df, 30))
             rec["explore"] = err or _preview(df, 5)
             continue
+        n_answer_rounds += 1
         if answer_type in (None, "explore"):
             answer_type = default_type
             rec["type_source"] = "question_analysis"

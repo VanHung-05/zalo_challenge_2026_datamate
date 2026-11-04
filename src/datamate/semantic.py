@@ -179,13 +179,13 @@ class SemanticLayer:
                    {text('staff')} AS staff
             FROM {src} L {' '.join(joins)}"""
         con = self.db.conn
-        con.execute(f"CREATE OR REPLACE TEMP TABLE sl_lines_raw AS {raw_sql}").fetchall()
+        con.execute(f"CREATE OR REPLACE TABLE sl_lines_raw AS {raw_sql}").fetchall()
 
         state_cases = " ".join(f"WHEN {_lit(k)} THEN {_lit(v or 'unknown')}" for k, v in sm.status_map.items())
         state = f"CASE status_raw {state_cases} ELSE 'unknown' END" if self.has_status and state_cases else "'completed'"
         first = lambda c: f"arg_min({c}, _row) FILTER (WHERE {c} IS NOT NULL)"  # noqa: E731 - fill-down (§8)
         con.execute(f"""
-            CREATE OR REPLACE TEMP TABLE sl_orders AS
+            CREATE OR REPLACE TABLE sl_orders AS
             WITH o AS (
                 SELECT order_id,
                        COALESCE(MIN(order_ts) FILTER (WHERE COALESCE(qty, 0) >= 0 AND COALESCE(line_amount, 0) >= 0), MIN(order_ts)) AS order_ts,
@@ -207,7 +207,7 @@ class SemanticLayer:
                      ELSE ({state}) END AS state
             FROM o""").fetchall()
         con.execute("""
-            CREATE OR REPLACE TEMP TABLE sl_lines AS
+            CREATE OR REPLACE TABLE sl_lines AS
             SELECT l._row, l.order_id, o.order_ts, o.order_date, l.product_code, l.product_name, l.product_group, l.unit,
                    l.qty, l.qty_base, l.unit_price, l.line_amount, l.cost_per_unit, l.return_qty,
                    o.state, o.customer_code, o.customer_name, o.customer_group, o.payment_method, o.sales_channel, o.staff
@@ -224,7 +224,7 @@ class SemanticLayer:
         return f"COALESCE({', '.join(parts)})" if parts else "NULL"
 
     def _build_conversion(self) -> bool:
-        """TEMP TABLE sl_conversion(pkey, ukey, factor) from the shop's conversion table, else from the
+        """TABLE sl_conversion(pkey, ukey, factor) from the shop's conversion table, else from the
         README ('- Coca Cola 330ml: 1 thùng = 24 lon'). Keys are normalized names (or product codes)."""
         rows: List[Tuple[str, str, float]] = []
         conv = self.sm.conversion
@@ -249,7 +249,7 @@ class SemanticLayer:
             uniq.setdefault((k, u), set()).add(f)
         clean = [(k, u, next(iter(fs))) for (k, u), fs in uniq.items() if len(fs) == 1]
         con = self.db.conn
-        con.execute("CREATE OR REPLACE TEMP TABLE sl_conversion (pkey VARCHAR, ukey VARCHAR, factor DOUBLE)").fetchall()
+        con.execute("CREATE OR REPLACE TABLE sl_conversion (pkey VARCHAR, ukey VARCHAR, factor DOUBLE)").fetchall()
         con.executemany("INSERT INTO sl_conversion VALUES (?, ?, ?)", clean)
         return True
 

@@ -85,6 +85,20 @@ def test_v2_llm_samples_must_agree(tmp_path):
     assert json.loads(out.read_text(encoding="utf-8"))["type"] == "abstain"
 
 
+def test_fast_path_disabled_uses_llm_only(tmp_path):
+    questions = [{"id": "q_rev", "business_id": "biz_1", "question": "Hôm nay cửa hàng bán được bao nhiêu tiền?", "as_of_date": "2026-03-03"}]
+    split = make_split(tmp_path, questions)
+    cfg = tmp_path / "cfg.yaml"
+    cfg.write_text("agent:\n  mode: sql\n  fast_path: false\n  n_samples: 3\n  max_retries: 0\ndecision:\n  tau: 0.7\n", encoding="utf-8")
+    out = tmp_path / "out" / "submission.jsonl"
+    llm = FakeLLM(["TYPE: number\n```sql\nSELECT SUM(line_amount) FROM sl_lines WHERE state IN ('completed','delivering') AND order_date = DATE '2026-03-03'\n```"] * 3)
+    run_pipeline(str(cfg), str(split), str(out), llm=llm)
+    assert json.loads(out.read_text(encoding="utf-8")) == {"id": "q_rev", "type": "number", "answer": 85000}
+    assert "sl_lines" in llm.prompts[0]   # the rulebook-applied tables are still offered to the LLM
+    log = json.loads((tmp_path / "out" / "logs" / "q_rev.json").read_text(encoding="utf-8"))
+    assert log["fast_path"] == {"disabled": True} and all(c["source"] == "llm" for c in log["candidates"])
+
+
 def test_resume_skips_answered(tmp_path):
     questions = [{"id": "q_rev", "business_id": "biz_1", "question": "Hôm nay cửa hàng bán được bao nhiêu tiền?", "as_of_date": "2026-03-03"}]
     split = make_split(tmp_path, questions)
