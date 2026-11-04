@@ -129,12 +129,16 @@ def build_features(cands: Sequence[Candidate], clusters: List[List[Candidate]], 
         "n_risk_flags": float(len(set(risk_flags))),
         "answer_type_confidence": float(answer_type_confidence),
         "llm_said_unanswerable": float(sum(1 for c in cands if c.source == "llm" and c.item.get("type") == "unanswerable")),
+        # code agent: how many runs the best agreeing sample needed (1 = first try), and whether it explored
+        "top_min_answer_rounds": float(min((c.meta.get("n_answer_rounds") or 1 for c in top), default=0)),
+        "top_explored": float(any((c.meta.get("n_explore") or 0) > 0 for c in top)),
     }
 
 
 FEATURE_ORDER = [
     "n_candidates", "n_value", "n_clusters", "top_size", "agreement", "top_has_fast_path",
     "top_checks_ok", "guard_p_unans", "n_risk_flags", "answer_type_confidence", "llm_said_unanswerable",
+    "top_min_answer_rounds", "top_explored",
 ]
 
 

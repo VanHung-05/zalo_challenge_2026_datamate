@@ -5,6 +5,9 @@ import re
 from typing import Any, Dict, List, Optional
 import requests
 
+# ggml type ids accepted by llama.cpp for the KV cache (llama_cpp.GGML_TYPE_*)
+GGML_TYPES = {"f32": 0, "f16": 1, "q4_0": 2, "q4_1": 3, "q5_0": 6, "q5_1": 7, "q8_0": 8}
+
 
 class LLMWrapper:
     """Unified LLM inference interface.
@@ -48,15 +51,25 @@ class LLMWrapper:
                 raise ImportError("llama-cpp-python is not installed (pip install llama-cpp-python with CUDA).")
             self.n_ctx = int(llm_cfg.get("n_ctx", 32768))
             self.enable_thinking = bool(llm_cfg.get("enable_thinking", False))
-            self.engine = Llama(
+            kw: Dict[str, Any] = dict(
                 model_path=llm_cfg.get("model_path", self.model),
                 n_ctx=self.n_ctx,
                 n_gpu_layers=int(llm_cfg.get("n_gpu_layers", -1)),
                 n_batch=int(llm_cfg.get("n_batch", 512)),
                 flash_attn=bool(llm_cfg.get("flash_attn", False)),
                 seed=self.seed,
-                verbose=False,
+                verbose=bool(llm_cfg.get("verbose", False)),
             )
+            # Fitting a 14B model + 32k context on 15 GB GPUs: split layers over GPUs (tensor_split: [1, 1])
+            # and/or quantize the KV cache (type_k / type_v: q8_0 halves it; needs flash_attn)
+            if llm_cfg.get("tensor_split"):
+                kw["tensor_split"] = [float(x) for x in llm_cfg["tensor_split"]]
+            for key in ("type_k", "type_v"):
+                if llm_cfg.get(key):
+                    kw[key] = GGML_TYPES.get(str(llm_cfg[key]).lower(), llm_cfg[key])
+            if llm_cfg.get("n_threads"):
+                kw["n_threads"] = int(llm_cfg["n_threads"])
+            self.engine = Llama(**kw)
         else:
             raise ValueError(f"Unknown LLM backend: {self.backend}")
 

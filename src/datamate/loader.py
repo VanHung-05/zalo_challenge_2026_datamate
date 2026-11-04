@@ -217,6 +217,42 @@ def is_numeric_column_name(col_name: str) -> bool:
     return any(k in norm for k in num_keywords)
 
 
+EXCEL_ERROR_VALUES = {"#VALUE!", "#N/A", "#REF!", "#DIV/0!", "#NAME?", "#NUM!", "#NULL!"}
+
+DATE_TEXT_RE = re.compile(
+    r"^\s*(\d{1,2}[/.-]\d{1,2}[/.-]\d{4}|\d{4}-\d{1,2}-\d{1,2}|\d{1,2}\s+(?:thg|tháng)\s+\d{1,2},?\s+\d{4})"
+    r"(?:[ T]\d{1,2}:\d{2}(?::\d{2})?)?\s*$", re.IGNORECASE)
+DMY_RE = re.compile(r"^\s*(\d{1,2})[/.-](\d{1,2})[/.-](\d{4})")
+
+
+def looks_date_column(s: pd.Series, min_share: float = 0.95) -> bool:
+    """Values, not the column name, decide: 'Sinh nhật', 'Hạn thanh toán', 'TaoLuc', 'Giờ bán' hold dates."""
+    texts = [v.strip() for v in s.dropna().tolist() if isinstance(v, str) and v.strip()]
+    if len(texts) < 3:
+        return False
+    uniq = list(dict.fromkeys(texts))[:5000]
+    return sum(1 for u in uniq if DATE_TEXT_RE.match(u)) >= min_share * len(uniq)
+
+
+def month_first_column(s: pd.Series) -> bool:
+    """True when a d/m/y-looking column is really m/d/y: some second field > 12 and no first field > 12.
+    Decided on the whole column (plan §4.1), never per value."""
+    first_gt12 = second_gt12 = False
+    for v in pd.unique(s.dropna()):
+        m = DMY_RE.match(str(v))
+        if m:
+            a, b = int(m.group(1)), int(m.group(2))
+            first_gt12 |= a > 12
+            second_gt12 |= b > 12
+    return second_gt12 and not first_gt12
+
+
+def _swap_day_month(v: Any) -> Any:
+    if isinstance(v, str):
+        return DMY_RE.sub(lambda m: f"{m.group(2)}/{m.group(1)}/{m.group(3)}", v, count=1)
+    return v
+
+
 def _map_unique(s: pd.Series, fn) -> pd.Series:
     """s.apply(fn), evaluated once per distinct value (keyed by type too: 1 and '1' differ)."""
     cache: Dict[Tuple[type, Any], Any] = {}
@@ -288,6 +324,9 @@ def clean_dataframe(df: pd.DataFrame, default_year: Optional[int] = None, keep_t
         clean_cols.append(c_str)
     df.columns = clean_cols
 
+    # Excel error cells exported as text ('#VALUE!', '#N/A' in a CSV) are not data
+    df = df.replace(list(EXCEL_ERROR_VALUES), np.nan)
+
     # Vectorized drop of nearly-all-null rows
     min_non_null = max(1, min(2, len(df.columns)))
     df = df.dropna(thresh=min_non_null).reset_index(drop=True)
@@ -321,9 +360,12 @@ def clean_dataframe(df: pd.DataFrame, default_year: Optional[int] = None, keep_t
 
     # Process date and numeric columns (parsed once per distinct value: dates repeat a lot)
     for col in df.columns:
-        if is_date_column_name(col):
+        if is_date_column_name(col) or looks_date_column(df[col]):
             try:
-                df[col] = _map_unique(df[col], lambda x: parse_vietnamese_date(x, default_year, keep_time))
+                src = df[col]
+                if month_first_column(src):
+                    src = _map_unique(src, _swap_day_month)
+                df[col] = _map_unique(src, lambda x: parse_vietnamese_date(x, default_year, keep_time))
             except Exception:
                 pass
         elif looks_numeric_column(df[col]):
@@ -478,12 +520,13 @@ def extract_year_month_from_filename(filename: str) -> Tuple[Optional[int], Opti
 
 
 # Suffixes that split one list into several files: _1, _2026, _T5_2025, _Thang05_2026, _TongHop_2025, _Sheet1
-SPLIT_SUFFIX_RE = re.compile(r"(?:[_\- ](?:\d{1,4}|T\d{1,2}_\d{4}|Thang\d{1,2}_\d{4}|TongHop_\d{4}|Sheet\d+))+$", re.IGNORECASE)
+# "_T10-2025", "_T7" (month sheet without year), "_Thang05_2026", "_1", "_Sheet2"
+SPLIT_SUFFIX_RE = re.compile(r"(?:[_\- ](?:\d{1,4}|T\d{1,2}(?:[_\-]\d{4})?|Thang\d{1,2}(?:[_\-]\d{4})?|TongHop[_\-]\d{4}|Sheet\d+))+$", re.IGNORECASE)
 
 
 # A period token anywhere in the name ends the file family: "BanHang_TongHop_2025_BanHang" (sheet of a
 # multi-sheet yearly file) and "BanHang_TongHop_2026" (single-sheet file) are both family "BanHang"
-PERIOD_TOKEN_RE = re.compile(r"[_\- ](?:TongHop_)?(?:T\d{1,2}_|Thang\d{1,2}_)?(?:19|20)\d{2}(?=$|[_\- ])", re.IGNORECASE)
+PERIOD_TOKEN_RE = re.compile(r"[_\- ](?:TongHop[_\-])?(?:T\d{1,2}[_\-]|Thang\d{1,2}[_\-])?(?:19|20)\d{2}(?=$|[_\- ])", re.IGNORECASE)
 
 
 def table_stem(name: str) -> str:
@@ -515,7 +558,7 @@ def merge_split_tables(tables: Dict[str, pd.DataFrame]) -> Dict[str, List[str]]:
 
 def _natural_key(name: str) -> List[Any]:
     """'X_2' < 'X_10'; 'BanHang_T2_2025' < 'BanHang_T10_2025' < 'BanHang_T1_2026' (year before month)."""
-    m = re.search(r"T(?:hang)?(\d{1,2})_(\d{4})$", name, re.IGNORECASE)
+    m = re.search(r"T(?:hang)?(\d{1,2})[_\-](\d{4})$", name, re.IGNORECASE)
     if m:
         return [name[: m.start()], int(m.group(2)), int(m.group(1))]
     return [int(t) if t.isdigit() else t.lower() for t in re.split(r"(\d+)", name)]

@@ -186,6 +186,10 @@ def run_pipeline(
                         except Exception:
                             log["load_error"] = traceback.format_exc()
                             ctx = None
+                    # one code worker at a time: the previous business's process is stopped (it restarts if needed)
+                    for other in business_cache.values():
+                        if hasattr(other, "close"):
+                            other.close()
                     business_cache[biz_id] = ctx
                 ctx = business_cache[biz_id]
 
@@ -231,6 +235,9 @@ def run_pipeline(
             print(f"[{processed_count}/{len(questions)}] [{biz_id}] ({q_dur:.1f}s) \"{q_short}\"", flush=True)
             print(f"       -> [{p_type}]: {ans_str}", flush=True)
 
+    for ctx in business_cache.values():
+        if hasattr(ctx, "close"):
+            ctx.close()
     total_elapsed = time.time() - start_time
     print(f"\n==========================================")
     print(f"Completed {processed_count} questions in {total_elapsed:.2f}s ({processed_count / max(total_elapsed, 1e-9):.2f} q/s)")

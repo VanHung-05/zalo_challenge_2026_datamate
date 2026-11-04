@@ -33,6 +33,12 @@ class BusinessContext:
     sem: SemanticLayer
     known_names: set = field(default_factory=set)
     load_seconds: float = 0.0
+    executor: Any = None          # pyexec.PyExecutor (agent.synthesis: python)
+    catalog: str = ""
+
+    def close(self) -> None:
+        if self.executor is not None:
+            self.executor.close()
 
 
 def build_context(biz_path: str, calendar_df: Optional[pd.DataFrame], rulebook: Rulebook, config: Dict[str, Any],
@@ -48,8 +54,22 @@ def build_context(biz_path: str, calendar_df: Optional[pd.DataFrame], rulebook: 
             card.save(os.path.join(cache_dir, f"{bdata.business_id}.card.json"))
         except Exception as e:
             print(f"[Warning] could not cache card: {e}")
-    return BusinessContext(bdata, db, card, sem, card.known_names(("product", "customer", "staff", "supplier", "product_group", "customer_group")),
-                           round(time.time() - t0, 2))
+    ctx = BusinessContext(bdata, db, card, sem, card.known_names(("product", "customer", "staff", "supplier", "product_group", "customer_group")))
+    if config.get("agent", {}).get("synthesis", "sql") == "python":
+        from src.datamate.code_agent import build_catalog
+        from src.datamate.pyexec import PyExecutor
+        hidden = {p for parts in bdata.metadata.get("merged_into", {}).values() for p in parts}
+        tables = {k: v for k, v in bdata.tables.items() if k not in hidden}
+        extra: Dict[str, Any] = {}
+        if calendar_df is not None:
+            extra["calendar"] = calendar_df
+        if sem.ok:  # rulebook-applied frames, the same definitions the SQL path uses
+            extra["sl_lines"] = db.conn.execute("SELECT * EXCLUDE (_row) FROM sl_lines ORDER BY _row").df()
+            extra["sl_orders"] = db.conn.execute("SELECT * FROM sl_orders ORDER BY order_ts, order_id").df()
+        ctx.executor = PyExecutor(tables, extra, cache_dir, name=bdata.business_id)
+        ctx.catalog = build_catalog(db)[0]
+    ctx.load_seconds = round(time.time() - t0, 2)
+    return ctx
 
 
 MONEY_RE = r"tien|doanh thu|dthu|\bgia\b|gia (ban|nhap|von|tri)|\bno\b|cong no|lai|loi nhuan|chi phi|von|thanh toan|voucher|phi ship|phi giao|\bdong\b|vnd"
@@ -208,6 +228,12 @@ def answer(
 
 def generate_llm_candidates(qid: str, a: QuestionAnalysis, ctx: BusinessContext, rulebook: Rulebook, extra_schema: str,
                             config: Dict[str, Any], llm: Any, ents: List[Any], money: bool, trace: Dict[str, Any]) -> List[Candidate]:
+    if config.get("agent", {}).get("synthesis", "sql") == "python" and ctx.executor is not None:
+        from src.datamate.code_agent import generate_code_candidates
+        parts = {"rulebook": rulebook.raw_text, "readme": ctx.bdata.readme, "card_text": ctx.card.to_prompt(),
+                 "catalog": ctx.catalog, "has_semantic": ctx.sem.ok}
+        return generate_code_candidates(qid, a, ctx.executor, parts, config, llm, entity_hits=ents, is_money=money,
+                                        known_names=ctx.known_names or None, trace=trace)
     from src.datamate.sql_agent import generate_sql_candidates
     return generate_sql_candidates(qid, a, ctx.db, ctx.bdata.readme, rulebook.raw_text, extra_schema, config, llm,
                                    entity_hits=ents, is_money=money, known_names=ctx.known_names or None, trace=trace)

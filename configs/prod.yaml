@@ -11,11 +11,13 @@ agent:
   mode: sql
   pipeline: v2            # v2: Business Card + semantic layer + fast path + Guard + calibrated decision | v1: single-shot SQL
   n_samples: 3
-  max_retries: 3
+  max_retries: 3          # repairs of the final program (traceback sent back)
   sandbox_timeout: 30
   sql_threads: 1
   on_llm_unanswerable: unanswerable
   sample_temperature: 0.7  # self-consistency samples 2..n (sample 1 is greedy); seed = llm.seed + i
+  synthesis: python        # python: LLM writes pandas code (code_agent.py) | sql: LLM writes DuckDB SQL (sql_agent.py)
+  max_explore: 2           # exploration programs per sample (printed output is sent back)
   fast_path: false         # false: answers come only from the LLM (sl_* tables + Guard stay on); true: deterministic intents first
   llm_verify_fast_path: false  # also run the LLM when the fast path answered
 

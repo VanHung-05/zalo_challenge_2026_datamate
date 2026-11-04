@@ -99,6 +99,26 @@ def test_fast_path_disabled_uses_llm_only(tmp_path):
     assert log["fast_path"] == {"disabled": True} and all(c["source"] == "llm" for c in log["candidates"])
 
 
+def test_code_agent_explore_retry_and_answer(tmp_path):
+    questions = [{"id": "q_rev", "business_id": "biz_1", "question": "Hôm nay cửa hàng bán được bao nhiêu tiền?", "as_of_date": "2026-03-03"}]
+    split = make_split(tmp_path, questions)
+    cfg = tmp_path / "cfg.yaml"
+    cfg.write_text("agent:\n  mode: sql\n  synthesis: python\n  fast_path: false\n  n_samples: 3\n  max_retries: 3\n"
+                   f"runner:\n  cache_dir: {(tmp_path / 'cache').as_posix()}\ndecision:\n  tau: 0.7\n", encoding="utf-8")
+    explore = "STEP: explore\n```python\nprint(sorted(tables))\nprint(sl_lines['state'].unique())\n```"
+    broken = "TYPE: number\n```python\nresult = tables['KhongCo']['x'].sum()\n```"
+    good = ("TYPE: number\n```python\nd = sl_lines[(sl_lines['order_date'].astype(str) == '2026-03-03') & "
+            "sl_lines['state'].isin(['completed', 'delivering'])]\nresult = d['line_amount'].sum()\n```")
+    llm = FakeLLM([explore, broken, good] + [good] * 2)
+    out = tmp_path / "out" / "submission.jsonl"
+    run_pipeline(str(cfg), str(split), str(out), llm=llm)
+    assert json.loads(out.read_text(encoding="utf-8")) == {"id": "q_rev", "type": "number", "answer": 85000}
+    # the exploration output and the traceback of the failed program were sent back to the LLM
+    assert "KẾT QUẢ KHÁM PHÁ LẦN 1" in llm.prompts[1] and "['ban_hang']" in llm.prompts[1]
+    assert "LẦN TRƯỚC BỊ LỖI" in llm.prompts[2] and "KeyError" in llm.prompts[2]
+    assert "tables['ban_hang']" in llm.prompts[0] and "'Thành tiền'" in llm.prompts[0]   # original names in the catalog
+
+
 def test_resume_skips_answered(tmp_path):
     questions = [{"id": "q_rev", "business_id": "biz_1", "question": "Hôm nay cửa hàng bán được bao nhiêu tiền?", "as_of_date": "2026-03-03"}]
     split = make_split(tmp_path, questions)
