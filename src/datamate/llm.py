@@ -1,6 +1,7 @@
-"""LLM Wrapper supporting dual backends: Ollama (dev on Mac) and vLLM (prod on GPU).
+"""LLM Wrapper: Ollama (dev on Mac), vLLM (prod on GPU), llama_cpp (GGUF in-process, e.g. Kaggle).
 """
 
+import re
 from typing import Any, Dict, List, Optional
 import requests
 
@@ -38,8 +39,50 @@ class LLMWrapper:
                 )
             except ImportError:
                 raise ImportError("vLLM is not installed. Use 'ollama' backend for local development.")
+        elif self.backend == "llama_cpp":
+            # GGUF models in-process (llama-cpp-python), e.g. on Kaggle. The chat template stored in the
+            # GGUF is applied by create_chat_completion.
+            try:
+                from llama_cpp import Llama
+            except ImportError:
+                raise ImportError("llama-cpp-python is not installed (pip install llama-cpp-python with CUDA).")
+            self.n_ctx = int(llm_cfg.get("n_ctx", 32768))
+            self.enable_thinking = bool(llm_cfg.get("enable_thinking", False))
+            self.engine = Llama(
+                model_path=llm_cfg.get("model_path", self.model),
+                n_ctx=self.n_ctx,
+                n_gpu_layers=int(llm_cfg.get("n_gpu_layers", -1)),
+                n_batch=int(llm_cfg.get("n_batch", 512)),
+                flash_attn=bool(llm_cfg.get("flash_attn", False)),
+                seed=self.seed,
+                verbose=False,
+            )
         else:
             raise ValueError(f"Unknown LLM backend: {self.backend}")
+
+    def _llama_cpp_generate(self, prompt: str, temp: float, max_tok: int, n: int, stop: List[str], seed: int) -> List[str]:
+        # "/no_think" is Qwen3's switch; for other models (Gemma...) it would only be noise in the prompt
+        is_qwen3 = "qwen3" in f"{self.model}".lower()
+        content = prompt + "\n/no_think" if (is_qwen3 and not self.enable_thinking) else prompt
+        try:
+            n_prompt = len(self.engine.tokenize(content.encode("utf-8")))
+            if n_prompt + max_tok > self.n_ctx:
+                print(f"[LLM Warning] prompt {n_prompt} + max_tokens {max_tok} tokens > n_ctx {self.n_ctx}; it will be cut")
+        except Exception:
+            pass
+        out = []
+        for i in range(n):
+            try:
+                r = self.engine.create_chat_completion(
+                    messages=[{"role": "user", "content": content}], temperature=temp, max_tokens=max_tok,
+                    stop=stop, seed=seed + i)
+                text = r["choices"][0]["message"].get("content") or ""
+            except Exception as e:
+                print(f"[LLM Error] llama_cpp generation failed: {e}")
+                text = ""
+            # Reasoning models may still emit a <think> block: only the answer after it is parsed
+            out.append(re.sub(r"<think>.*?</think>", "", text, flags=re.S).strip())
+        return out
 
     def _chat(self, prompt: str) -> str:
         """Instruct models expect their chat template; a raw prompt degrades them (vLLM .generate()
@@ -106,5 +149,8 @@ class LLMWrapper:
             )
             outputs = self.engine.generate([self._chat(prompt)], params)
             return [o.text for o in outputs[0].outputs]
+
+        elif self.backend == "llama_cpp":
+            return self._llama_cpp_generate(prompt, temp, max_tok, n, stop_tokens, req_seed)
 
         return []
